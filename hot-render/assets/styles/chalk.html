@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>hot-render · chalk</title>
+<script src="spec.js"></script>
+<style>
+  /* chalk：黑板粉笔风。墨绿黑板 + 粉笔灰，字是楷体（系统自带：Windows 楷体、Mac 楷体-简），
+     字一笔笔从左往右写出来，下划线、圈、删除线、条形外框都是手画线一笔画出来；换屏是板擦擦过去。
+     任何时候都不缩放、不推近。 */
+  :root {
+    --board: #22362d; --chalk: #EEEDE6; --yellow: #F4D35E; --pink: #F28B82;
+    --hand: "Kaiti SC", "STKaiti", "KaiTi", "楷体", "AR PL UKai CN", "Noto Serif CJK SC", serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { overflow: hidden; background: var(--board); }
+  body { font-family: var(--hand); font-weight: 700; color: var(--chalk); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  .abs { position: absolute; }
+  .layer { position: absolute; inset: 0; overflow: hidden; }
+  .board { background: radial-gradient(ellipse at 45% 40%, #2b4338 0%, #22362d 55%, #1c2d25 100%); }
+  .page { position: absolute; display: flex; flex-direction: column; justify-content: center; }
+  .c { filter: url(#chalk); text-shadow: 0 0 1px rgba(238,237,230,.35); }
+  .nw { white-space: nowrap; }
+  .row { display: flex; align-items: center; }
+  .col { display: flex; flex-direction: column; }
+  svg.ln { position: absolute; overflow: visible; pointer-events: none; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <!-- 粉笔字：边缘轻微抖动 + 一点点颗粒，看起来是写在板上的 -->
+  <filter id="chalk" x="-5%" y="-10%" width="110%" height="120%">
+    <feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" seed="3" result="n"/>
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="3" xChannelSelector="R" yChannelSelector="G" result="d"/>
+    <feTurbulence type="fractalNoise" baseFrequency="1.6" numOctaves="1" seed="9" result="g"/>
+    <feColorMatrix in="g" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -0.9 1.4" result="m"/>
+    <feComposite in="d" in2="m" operator="in"/>
+  </filter>
+</svg>
+<div id="stage"></div>
+<script src="core.js"></script>
+<script>
+const { SP, PORT, K, px, clamp, ease, expo, easeIO, esc, parseNum, tw, fitSize, AREA, blurIn, clipIn, rollNum, sceneAt } = window.HR;
+const S = document.getElementById('stage');
+const CHALK = '#EEEDE6', YEL = '#F4D35E', PINK = '#F28B82', DIM = 'rgba(238,237,230,.55)';
+const CW = AREA.w;
+
+// 「写出来」：从左往右露出（写字的速度约 0.07 秒一个字）
+const write = (text, t, t0, per = .07, min = .3) => clipIn(t, t0, Math.max(min, tw(text) * per), 'L', (x) => x);
+// 手画线：路径用 pathLength=100，按进度画出来
+const stroke = (t, t0, dur) => { const k = ease((t - t0) / dur); return `stroke-dasharray:100;stroke-dashoffset:${(100 * (1 - k)).toFixed(2)};${k <= 0 ? 'opacity:0;' : ''}`; };
+// 一条有点抖的手画横线（宽 w，设计坐标）
+const wavy = (w, amp = 5, seed = 1) => { let d = `M0 ${amp}`; for (let x = 20; x <= w; x += 20) d += ` L${x} ${(amp + Math.sin(x * .05 + seed) * amp * .6 + Math.sin(x * .013 + seed * 2) * amp * .8).toFixed(1)}`; return d; };
+// 一个手画的圈（略多画一点点，首尾不完全对上）
+const ring = (w, h, seed = 1) => { const pts = []; for (let i = 0; i <= 40; i++) { const a = -2.2 + i / 40 * Math.PI * 2.15, r = 1 + Math.sin(a * 3 + seed) * .04;
+  pts.push(`${(w / 2 + Math.cos(a) * w / 2 * r).toFixed(1)} ${(h / 2 + Math.sin(a) * h / 2 * r).toFixed(1)}`); } return 'M' + pts.join(' L'); };
+const svgLine = (d, w, h, color, sw, st, pos) => `<svg class="ln" width="${px(w)}" height="${px(h)}" viewBox="0 0 ${w} ${h}" style="${pos}"><path d="${d}" pathLength="100" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" filter="url(#chalk)" style="${st}"/></svg>`;
+// 粉笔斜线填充（条形、进度条）
+const HATCH = (c) => `background-image:repeating-linear-gradient(-55deg, ${c} 0 ${px(5)}, transparent ${px(5)} ${px(14)});`;
+
+// ---------- 七种画面 ----------
+function vTitle(v, t, d) {
+  const text = String(v.text || '');
+  const vs = text.match(/^(.+?)\s+(vs|VS|对|vs\.)\s+(.+)$/);
+  let main, endAt;
+  if (vs) {
+    const fs = fitSize(vs[1] + vs[3] + '   ', PORT ? 210 : 260, CW * .85);
+    const t1 = Math.max(.3, tw(vs[1]) * .07), t2 = t1 + .35;
+    main = `<div class="row nw" style="gap:${px(60)}">
+      <span class="c" style="font-size:${px(fs)};${write(vs[1], t, 0)}">${esc(vs[1])}</span>
+      <span style="position:relative;font-size:${px(fs * .45)};color:${PINK}"><span class="c" style="${blurIn(t, t1, .15, 4)}">vs</span>
+        ${svgLine(ring(fs * .9, fs * .62, 2), fs * .9, fs * .62, PINK, 5, stroke(t, t1 + .1, .35), `left:${px(-fs * .22)};top:${px(-fs * .06)}`)}</span>
+      <span class="c" style="font-size:${px(fs)};${write(vs[3], t, t2)}">${esc(vs[3])}</span></div>`;
+    endAt = t2 + tw(vs[3]) * .07;
+  } else {
+    const fs = fitSize(text, PORT ? 190 : 230, CW * .92);
+    const w = Math.min(CW, tw(text) * fs * 1.02);
+    main = `<div style="position:relative"><div class="c nw" style="font-size:${px(fs)};${write(text, t, 0)}">${esc(text)}</div>
+      ${svgLine(wavy(w, 6, 3), w, 16, YEL, 7, stroke(t, Math.max(.3, tw(text) * .07), .4), `left:0;top:calc(100% + ${px(8)})`)}</div>`;
+    endAt = Math.max(.3, tw(text) * .07) + .3;
+  }
+  const sub = v.sub ? `<div class="c nw" style="font-size:${px(fitSize(v.sub, PORT ? 58 : 64, CW * .9))};color:${YEL};margin-top:${px(56)};${write(v.sub, t, endAt, .05)}">${esc(v.sub)}</div>` : '';
+  return `<div class="col">${main}${sub}</div>`;
+}
+
+function vNumber(v, t, d) {
+  const p = parseNum(v.value), f = v.from != null ? parseNum(v.from) : null;
+  const label = String(v.label || '');
+  const shown = rollNum(v.value, f ? v.from : 0, t, .35, 1.0);
+  const isPct = p && p.suf.trim() === '%' && p.n >= 0 && p.n <= 100;
+  const cur = p ? parseFloat(shown.replace(/[^\d.\-]/g, '')) : 0;
+  const lfs = fitSize(label, PORT ? 70 : 78, CW * .9);
+  const vfs = fitSize(String(v.value), PORT ? 280 : 330, CW * .8, .62 / .58);
+  const vw = tw(String(v.value)) * vfs * .62 / .58;
+  const old = f ? `<div class="row nw" style="gap:${px(30)};margin-top:${px(16)}">
+      <span style="position:relative"><span class="c" style="font-size:${px(PORT ? 100 : 116)};color:${DIM};${write(v.from, t, .25, .05)}">${esc(v.from)}</span>
+        ${svgLine(wavy(tw(v.from) * 116 * .62, 4, 5), tw(v.from) * 116 * .62, 12, PINK, 8, stroke(t, .55, .25), `left:0;top:45%`)}</span>
+      <span class="c" style="font-size:${px(PORT ? 86 : 96)};color:${PINK};${blurIn(t, .75, .2, 4)}">→</span></div>` : '';
+  const circle = v._alt && !f ? svgLine(ring(vw * 1.18, vfs * 1.05, 4), vw * 1.18, vfs * 1.05, YEL, 7, stroke(t, 1.25, .45), `left:${px(-vw * .09)};top:${px(-vfs * .02)}`) : '';
+  const bar = isPct ? `<div style="position:relative;width:${px(CW * (PORT ? 1 : .7))};height:${px(46)};margin-top:${px(26)}">
+      ${svgLine(`M2 2 L${CW * .7 - 2} 4 L${CW * .7 - 4} 44 L3 43 Z`, CW * .7, 46, CHALK, 4, stroke(t, .2, .5), 'left:0;top:0')}
+      <div class="abs" style="left:${px(6)};top:${px(8)};bottom:${px(8)};width:calc(${clamp(cur / 100) * 100}% - ${px(12)});${HATCH(YEL)}"></div></div>` : '';
+  return `<div class="col">
+    <div class="c nw" style="font-size:${px(lfs)};color:${DIM};${write(label, t, 0, .05)}">${esc(label)}</div>${old}
+    <div style="position:relative;align-self:flex-start"><div class="c nw" style="font-size:${px(vfs)};line-height:1.05;color:${CHALK};${blurIn(t, .3, .25, 6)}">${esc(shown)}</div>${circle}</div>${bar}</div>`;
+}
+
+function vBars(v, t, d) {
+  const items = (v.items || []).slice(0, 6), n = items.length;
+  const nums = items.map((x) => parseFloat(x.value) || 0), max = Math.max(...nums, 1e-9);
+  const hl = v.highlight != null ? String(v.highlight) : null;
+  const rowH = PORT ? (n <= 4 ? 150 : 118) : (n <= 4 ? 116 : 94);
+  const nameW = Math.max(...items.map((x) => tw(x.name)), 2), nameMax = PORT ? 300 : 440;
+  const nfs = Math.min(PORT ? 64 : 68, (nameMax - 10) / nameW);
+  const title = v.title ? `<div class="c nw" style="font-size:${px(fitSize(v.title, PORT ? 90 : 100, CW * .92))};margin-bottom:${px(26)};${write(v.title, t, 0, .05)}">${esc(v.title)}</div>` : '';
+  const t1 = v.title ? Math.max(.3, tw(v.title) * .05) : 0;
+  const rows = items.map((x, i) => {
+    const t0 = t1 + i * .14, isHl = hl ? String(x.name) === hl : nums[i] === max, col = isHl ? YEL : CHALK;
+    const w = (PORT ? 60 : 72) * nums[i] / max;
+    return `<div class="row" style="height:${px(rowH)};gap:${px(26)}">
+      <div class="c nw" style="width:${px(nameW * nfs + 10)};font-size:${px(nfs)};color:${col};${write(x.name, t, t0, .05)}">${esc(x.name)}</div>
+      <div style="flex:1;position:relative;height:${px(rowH * .46)}">
+        <div class="abs" style="left:0;top:0;bottom:0;width:${Math.max(w, .4)}%;border:${px(4)} solid ${col};filter:url(#chalk);${HATCH(isHl ? YEL : 'rgba(238,237,230,.55)')}${clipIn(t, t0 + .15, .6, 'L', easeIO)}"></div>
+        <div class="abs c nw" style="left:calc(${Math.max(w, .4)}% + ${px(22)});top:50%;transform:translateY(-50%);font-size:${px(nfs * 1.05)};color:${col};${write(String(x.value) + (x.unit || ''), t, t0 + .7, .05)}">${esc(String(x.value))}${esc(x.unit || '')}</div></div></div>`;
+  }).join('');
+  return `<div class="col">${title}${rows}</div>`;
+}
+
+function vCompare(v, t, d) {
+  const L = v.left || {}, R = v.right || {}, pl = parseNum(L.value), pr = parseNum(R.value);
+  const num = pl && pr && pl.suf === pr.suf, winL = num && pl.n > pr.n, winR = num && pr.n > pl.n;
+  const half = PORT ? CW : (CW - 120) / 2;
+  const side = (o, win, t0) => {
+    const nfs = fitSize(o.name, PORT ? 110 : 140, half * .9), vfs = fitSize(String(o.value ?? ''), PORT ? 190 : 230, half * .8, .62 / .58);
+    const vw = tw(String(o.value)) * vfs * .62 / .58;
+    return `<div class="col" style="width:${px(half)};align-items:center">
+      <div class="c nw" style="font-size:${px(nfs)};${write(o.name, t, t0, .06)}">${esc(o.name)}</div>
+      <div style="position:relative;margin-top:${px(14)}"><div class="c nw" style="font-size:${px(vfs)};color:${win ? YEL : CHALK};${blurIn(t, t0 + .3, .25, 6)}">${esc(rollNum(o.value, 0, t, t0 + .3, .9))}</div>
+        ${win ? svgLine(ring(vw * 1.08, vfs * 1.0, 6), vw * 1.08, vfs * 1.0, YEL, 7, stroke(t, 1.3, .45), `left:${px(-vw * .04)};top:${px(vfs * .02)}`) : ''}</div>
+      ${o.note ? `<div class="c nw" style="font-size:${px(PORT ? 44 : 50)};color:${DIM};margin-top:${px(10)};${write(o.note, t, t0 + .6, .05)}">${esc(o.note)}</div>` : ''}</div>`;
+  };
+  const mid = PORT ? svgLine(wavy(CW, 5, 7), CW, 14, CHALK, 4, stroke(t, .2, .4), 'position:relative')
+    : `<div style="position:relative;width:${px(120)};height:${px(420)}">${svgLine(`M60 0 L58 120 L62 260 L59 420`, 120, 420, CHALK, 4, stroke(t, .1, .45), 'left:0;top:0')}
+        <span class="abs c" style="left:${px(30)};top:${px(170)};font-size:${px(70)};color:${PINK};background:#22362d;${blurIn(t, .4, .2, 4)}">vs</span></div>`;
+  return `<div class="${PORT ? 'col' : 'row'}" style="align-items:center;justify-content:center;gap:${px(PORT ? 30 : 0)}">${side(L, winL, 0)}${mid}${side(R, winR, .2)}</div>`;
+}
+
+function vList(v, t, d) {
+  const items = (v.items || []).slice(0, 5);
+  const title = v.title ? `<div class="c nw" style="font-size:${px(fitSize(v.title, PORT ? 90 : 100, CW * .92))};margin-bottom:${px(26)};${write(v.title, t, 0, .05)}">${esc(v.title)}</div>` : '';
+  const t1 = v.title ? Math.max(.3, tw(v.title) * .05) : .1;
+  const gap = clamp((d - 1.0 - t1) / Math.max(items.length, 1), .25, .7);
+  const rows = items.map((x, i) => {
+    const t0 = t1 + i * gap, fs = fitSize(x, PORT ? 72 : 78, CW - 170);
+    return `<div class="row" style="gap:${px(40)};min-height:${px(PORT ? 128 : 110)}">
+      <div style="position:relative;flex:none;width:${px(90)};height:${px(90)}">
+        <span class="abs c" style="inset:0;display:flex;align-items:center;justify-content:center;font-size:${px(64)};color:${YEL};${blurIn(t, t0, .15, 4)}">${i + 1}</span>
+        ${svgLine(ring(90, 90, i + 1), 90, 90, YEL, 5, stroke(t, t0, .3), 'left:0;top:0')}</div>
+      <div class="c" style="font-size:${px(fs)};${write(x, t, t0 + .2, .04)}">${esc(x)}</div></div>`;
+  }).join('');
+  return `<div class="col">${title}${rows}</div>`;
+}
+
+function vQuote(v, t, d) {
+  const text = String(v.text || ''), n = [...text].length;
+  const fs = PORT ? (n <= 10 ? 140 : n <= 18 ? 112 : 88) : (n <= 12 ? 170 : n <= 20 ? 136 : 104);
+  const dur = Math.min(1.5, d * .5);
+  return `<div class="col" style="position:relative">
+    <div class="abs c" style="left:${px(-20)};top:${px(-fs * 1.25)};font-size:${px(fs * 1.7)};color:${YEL};${blurIn(t, 0, .2, 4)}">“</div>
+    <div class="c" style="font-size:${px(fs)};line-height:1.25;max-width:${px(CW)};${clipIn(t, .15, dur, 'L', (x) => x)}">${esc(text)}</div>
+    ${v.who ? `<div class="c" style="font-size:${px(PORT ? 44 : 48)};color:${DIM};margin-top:${px(40)};${write('—— ' + v.who, t, .3 + dur, .03)}">—— ${esc(v.who)}</div>` : ''}</div>`;
+}
+
+function vVote(v, t, d) {
+  const opts = (v.options || []).slice(0, 4), n = opts.length;
+  const cw = PORT ? 400 : Math.min(420, (CW - (n - 1) * 50) / n), ch = PORT ? 180 : 190;
+  const q = String(v.question || ''), fs = fitSize(q, PORT ? 170 : 200, CW * .9), t1 = Math.max(.3, tw(q) * .07);
+  const go = t1 + .4 + n * .15 + .3;
+  const chips = opts.map((o, i) => {
+    const t0 = t1 + .4 + i * .15;
+    const cyc = t > go ? (t - go) % (n * .6) : -1, on = cyc >= i * .6 && cyc < (i + 1) * .6;   // 轮流给一个选项画勾
+    return `<div style="position:relative;width:${px(cw)};height:${px(ch)}">
+      ${svgLine(`M3 4 L${cw - 4} 2 L${cw - 2} ${ch - 3} L2 ${ch - 2} Z`, cw, ch, CHALK, 5, stroke(t, t0, .4), 'left:0;top:0')}
+      <span class="abs c" style="inset:0;display:flex;align-items:center;justify-content:center;font-size:${px(fitSize(o, 110, cw - 60))};${write(o, t, t0 + .2, .06)}">${esc(o)}</span>
+      ${on ? svgLine(`M10 40 L40 70 L95 5`, 105, 80, YEL, 9, stroke(t, go + Math.floor((t - go) / .6) * .6, .25), `left:${px(cw - 60)};top:${px(-50)}`) : ''}</div>`;
+  }).join('');
+  const grid = PORT && n > 2 ? `<div style="display:grid;grid-template-columns:repeat(2,${px(cw)});gap:${px(50)}">${chips}</div>` : `<div class="row" style="gap:${px(50)}">${chips}</div>`;
+  const w = Math.min(CW, tw(q) * fs);
+  return `<div class="col" style="gap:${px(80)}"><div style="position:relative"><div class="c nw" style="font-size:${px(fs)};${write(q, t, 0)}">${esc(q)}</div>
+    ${svgLine(wavy(w, 6, 8), w, 16, YEL, 7, stroke(t, t1, .35), `left:0;top:calc(100% + ${px(6)})`)}</div>${grid}</div>`;
+}
+
+const DRAW = { title: vTitle, number: vNumber, bars: vBars, compare: vCompare, list: vList, quote: vQuote, vote: vVote };
+{ let n = 0; for (const x of SP.scenes) if ((x.visual || {}).type === 'number') x.visual._alt = n++ % 2 === 1; }
+
+function scenePage(i, lt) {
+  const sc = SP.scenes[i], v = sc.visual || {};
+  const draw = DRAW[v.type] || vTitle;
+  const kick = v.kicker ? `<div class="abs c nw" style="${PORT ? `left:${px(70)};top:${px(150)}` : `left:${px(100)};top:${px(50)}`};font-size:${px(PORT ? 44 : 42)};color:${YEL};${write(v.kicker, lt, 0, .03)}">${esc(v.kicker)}</div>` : '';
+  return `<div class="layer board"><div class="page" style="left:${px(AREA.l)};right:${px(AREA.r)};top:${px(AREA.t)};bottom:${px(AREA.b)}">${draw(v, lt, sc.dur)}</div>${kick}</div>`;
+}
+
+// 板上的粉笔灰（静态）
+const DUST = `<svg class="abs" style="inset:0;opacity:.07;pointer-events:none" width="100%" height="100%"><filter id="dust"><feTurbulence type="fractalNoise" baseFrequency=".012 .03" numOctaves="3" seed="4"/><feColorMatrix values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 1.4 -.35"/></filter><rect width="100%" height="100%" filter="url(#dust)"/></svg>`;
+
+window.render = (t) => {
+  const { i, sc, lt } = sceneAt(t);
+  let html;
+  const TR = .45;
+  if (i > 0 && lt < TR) {
+    // 换屏：板擦从左往右擦过去，擦过的地方露出下一屏
+    const w = easeIO(lt / TR), x = (w * 112 - 6).toFixed(2);
+    html = `<div class="layer">${scenePage(i - 1, SP.scenes[i - 1].dur + lt)}</div>`
+      + `<div class="layer" style="clip-path:inset(0 ${(100 - w * 100).toFixed(2)}% 0 0)">${scenePage(i, lt)}</div>`
+      + `<div class="abs" style="top:0;bottom:0;left:calc(${x}% - ${px(80)});width:${px(160)};background:linear-gradient(90deg,rgba(34,54,45,0),rgba(150,165,155,.18) 45%,rgba(34,54,45,.0));filter:blur(${px(6)})"></div>`;
+  } else html = scenePage(i, lt);
+  const corner = SP.corner ? `<div class="abs c nw" style="right:${px(PORT ? 150 : 60)};top:${px(PORT ? 70 : 44)};font-size:${px(PORT ? 32 : 30)};color:${DIM}">${esc(SP.corner)}</div>` : '';
+  let cap = '';
+  if (sc.caption) {
+    const av = SP.avatar ? `<span style="position:relative;flex:none;width:${px(96)};height:${px(96)};border-radius:50%;overflow:hidden;background:${CHALK};border:${px(4)} solid ${CHALK}"><img src="${esc(SP.avatar)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 30%"></span>` : '';
+    const fs = fitSize(sc.caption, PORT ? 56 : 54, (PORT ? 760 : 1400));
+    const pos = PORT ? `left:${px(70)};bottom:${px(470)}` : `left:${px(56)};bottom:${px(40)}`;
+    cap = `<div class="abs row" style="${pos};gap:${px(20)}">${av}<span class="nw" style="font-size:${px(fs)};padding:${px(8)} ${px(24)};background:rgba(10,20,15,.55);color:${CHALK}">${esc(sc.caption)}</span></div>`;
+  }
+  S.innerHTML = html + DUST + corner + cap;
+  return true;
+};
+window.PRELOAD.then(() => window.render(0));
+</script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 script.json 渲染成视频（纸面风格数据画面 + 字幕胶囊 + 背景音乐 + 转场音效）。
+"""把 script.json 渲染成视频（数据画面 + 字幕 + 背景音乐 + 转场音效），画面有几种风格可选（--style）。
 
 只用 Python 标准库；另外要 Node 22+、Chrome（或 Edge / Chromium）、ffmpeg（没有会自动装 imageio-ffmpeg）。
 用法（在用户的工作文件夹里运行）：
@@ -8,6 +8,7 @@
 选项：
   --dir 热点/今天日期        默认今天的文件夹
   --size 1920x1080           横屏（默认）；竖屏用 1080x1920
+  --style poster|chalk|paper  画面风格：poster 海报风（默认）、chalk 黑板粉笔、paper 纸面卡片
   --music beat|none|文件路径  beat = 自带合成的节奏（默认）；none = 只留转场音效（发布时在 App 里选热门音乐）；
                               也可以给一个 mp3 / wav（自己有版权的）
   --avatar 图片路径           字幕胶囊左边的圆形头像（可选；默认用 热点/avatar.png，没有就不放）
@@ -29,6 +30,9 @@ except Exception:
     pass
 
 TYPES = {"title", "number", "bars", "compare", "list", "quote", "vote"}
+STYLES = {"poster": "海报风：热橙 / 墨黑大色块、超大斜体粗字、整块色板换屏",
+          "chalk": "黑板粉笔：墨绿黑板、粉笔字一笔笔写出来、手画下划线和圈",
+          "paper": "纸面卡片：米色点阵底、白卡片、绿色强调"}
 
 
 def die(msg):
@@ -123,10 +127,12 @@ def load(dirp, size, avatar):
     return sc, spec, warns
 
 
-def prepare(dirp, spec, avatar):
+def prepare(dirp, spec, avatar, style):
     rd = dirp / "render"
     rd.mkdir(exist_ok=True)
-    shutil.copy(ASSETS / "page.html", rd / "page.html")
+    shutil.copy(ASSETS / "styles" / f"{style}.html", rd / "page.html")
+    shutil.copy(ASSETS / "styles" / "core.js", rd / "core.js")
+    shutil.copytree(ASSETS / "fonts", rd / "fonts", dirs_exist_ok=True)
     if avatar:
         ap = Path(avatar)
         if not ap.exists():
@@ -248,6 +254,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=os.path.join("热点", datetime.now().strftime("%Y-%m-%d")), help="稿子所在文件夹，默认 热点/今天日期")
     ap.add_argument("--size", default="1920x1080", help="1920x1080 横屏（默认）/ 1080x1920 竖屏")
+    ap.add_argument("--style", default="poster", choices=sorted(STYLES), help="画面风格：poster（默认）/ chalk / paper")
     ap.add_argument("--music", default="beat", help="beat（默认，自带合成节奏）/ none（只留转场音效）/ 音乐文件路径")
     ap.add_argument("--avatar", default=None, help="字幕胶囊头像，默认 热点/avatar.png")
     ap.add_argument("--fps", type=int, default=30)
@@ -266,17 +273,21 @@ def main():
                 break
     sc, spec, warns = load(dirp, a.size, avatar)
     node, chrome, ffmpeg = find_node(), find_chrome(), find_ffmpeg()
-    rd = prepare(dirp, spec, avatar)
+    rd = prepare(dirp, spec, avatar, a.style)
     t0 = time.time()
-    print(f"{len(spec['scenes'])} 屏，{spec['total']} 秒，{a.size}，头像：{'有' if spec['avatar'] else '无'}")
+    print(f"{len(spec['scenes'])} 屏，{spec['total']} 秒，{a.size}，风格：{a.style}（{STYLES[a.style]}），头像：{'有' if spec['avatar'] else '无'}")
     for w in warns:
         print("提醒  " + w)
 
     chk = rd / f"check-{spec['w']}x{spec['h']}"
     sheet = chk / "sheet.jpg"
-    fresh = sheet.exists() and sheet.stat().st_mtime > (dirp / "script.json").stat().st_mtime and sheet.stat().st_mtime > (ASSETS / "page.html").stat().st_mtime
+    tag = chk / "style.txt"   # 定格图是哪种风格出的；换了风格就得重出
+    fresh = (sheet.exists() and tag.exists() and tag.read_text(encoding="utf-8").strip() == a.style
+             and sheet.stat().st_mtime > (dirp / "script.json").stat().st_mtime
+             and sheet.stat().st_mtime > (ASSETS / "styles" / f"{a.style}.html").stat().st_mtime)
     if a.check or a.only or not fresh:
         chk, files = stills(node, chrome, ffmpeg, rd, spec, set(filter(None, a.only.split(","))))
+        (chk / "style.txt").write_text(a.style, encoding="utf-8")
         print(f"定格图 {len(files)} 张：{chk}（总览拼图 {chk / 'sheet.jpg'}）")
     else:
         print(f"定格图比稿子新，不重出：{sheet}")
@@ -292,7 +303,7 @@ def main():
     vid.unlink()
     aud.unlink()
     mb = out.stat().st_size / 1e6
-    print(f"完成：{out}（{spec['total']} 秒，{mb:.1f}MB，音乐 {a.music}，转场音效 {n_sfx} 个，用时 {time.time() - t0:.0f} 秒）")
+    print(f"完成：{out}（{spec['total']} 秒，{mb:.1f}MB，风格 {a.style}，音乐 {a.music}，转场音效 {n_sfx} 个，用时 {time.time() - t0:.0f} 秒）")
 
 
 if __name__ == "__main__":

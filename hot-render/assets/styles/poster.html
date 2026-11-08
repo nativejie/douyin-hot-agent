@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>hot-render · poster</title>
+<script src="spec.js"></script>
+<style>
+  /* poster：海报风。热橙 / 墨黑两种底一屏一换，大字是得意黑（斜体粗黑体），正文是系统黑体粗体，
+     颗粒纸感。动效只有位移、模糊、裁切、数字滚动；换屏是整块色板擦过去；任何时候都不缩放、不推近。 */
+  @font-face { font-family: "Smiley"; src: url("fonts/SmileySans-Oblique.woff2") format("woff2"); }
+  :root {
+    --hot: #FF4A1C; --ink: #0D0D0D; --paper: #F3EFE6;
+    --display: "Smiley", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --body: "Source Han Sans SC", "Source Han Sans CN", "Noto Sans CJK SC", "PingFang SC", "DengXian", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { overflow: hidden; background: var(--ink); }
+  body { font-family: var(--body); font-weight: 700; -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  .abs { position: absolute; }
+  .layer { position: absolute; inset: 0; overflow: hidden; }
+  .page { position: absolute; display: flex; flex-direction: column; justify-content: center; }
+  .d { font-family: var(--display); font-weight: 400; line-height: .95; white-space: nowrap; }
+  .nw { white-space: nowrap; }
+  .row { display: flex; align-items: center; }
+  .col { display: flex; flex-direction: column; }
+  .ch { display: inline-block; }
+  #grain { position: absolute; inset: 0; pointer-events: none; opacity: .10; mix-blend-mode: multiply; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script src="core.js"></script>
+<script>
+const { SP, PORT, K, px, clamp, expo, easeIO, esc, parseNum, tw, fitSize, AREA, blurIn, slideIn, clipIn, rollNum, sceneAt } = window.HR;
+const S = document.getElementById('stage');
+const HOT = '#FF4A1C', INK = '#0D0D0D', PAPER = '#F3EFE6';
+// 一屏橙底、一屏黑底轮着来；fg = 主字色，ac = 强调色，dim = 弱化色
+const THEME = (i) => i % 2 === 0
+  ? { bg: HOT, fg: INK, ac: PAPER, dim: 'rgba(13,13,13,.45)', track: 'rgba(13,13,13,.16)', plate: INK, plateFg: PAPER }
+  : { bg: INK, fg: PAPER, ac: HOT, dim: 'rgba(243,239,230,.45)', track: 'rgba(243,239,230,.14)', plate: HOT, plateFg: INK };
+const CW = AREA.w;   // 内容宽度（设计坐标）
+
+// 逐字模糊出现（标题用）
+const perChar = (text, t, t0, step = .05) => [...String(text)].map((c, i) => `<span class="ch" style="${blurIn(t, t0 + i * step, .16, 12)}">${c === ' ' ? '&nbsp;' : esc(c)}</span>`).join('');
+
+// ---------- 七种画面 ----------
+function vTitle(v, t, d, T) {
+  const text = String(v.text || '');
+  const vs = text.match(/^(.+?)\s+(vs|VS|对|vs\.)\s+(.+)$/);
+  let main;
+  if (vs) {
+    const fs = fitSize(vs[1] + vs[3] + '  ', PORT ? 230 : 300, CW * .9);
+    main = `<div class="row nw" style="gap:${px(40)};align-items:baseline">
+      <span class="d" style="font-size:${px(fs)};color:${T.fg};${slideIn(t, 0, -180)}">${esc(vs[1])}</span>
+      <span class="d" style="font-size:${px(fs * .42)};color:${T.ac};${blurIn(t, .22, .2)}">vs</span>
+      <span class="d" style="font-size:${px(fs)};color:${T.fg};${slideIn(t, .06, 180)}">${esc(vs[3])}</span></div>`;
+  } else {
+    const fs = fitSize(text, PORT ? 200 : 260, CW * .95);
+    main = `<div class="d" style="font-size:${px(fs)};color:${T.fg}">${perChar(text, t, 0)}</div>`;
+  }
+  const sub = v.sub ? `<div class="row" style="gap:${px(28)};margin-top:${px(50)}">
+      <span style="flex:none;width:${px(14)};height:${px(PORT ? 70 : 64)};background:${T.ac};${clipIn(t, .4, .25, 'U')}"></span>
+      <span class="nw" style="font-size:${px(fitSize(v.sub, PORT ? 54 : 60, CW * .85))};color:${T.fg};${slideIn(t, .45, 60, 0, .35, 8)}">${esc(v.sub)}</span></div>` : '';
+  return `<div class="col">${main}${sub}</div>`;
+}
+
+function vNumber(v, t, d, T) {
+  const p = parseNum(v.value), f = v.from != null ? parseNum(v.from) : null;
+  const shown = rollNum(v.value, f ? v.from : 0, t, .25, 1.1);
+  const label = String(v.label || '');
+  const isPct = p && p.suf.trim() === '%' && p.n >= 0 && p.n <= 100;
+  const cur = p ? parseFloat(rollNum(v.value, f ? v.from : 0, t, .25, 1.1).replace(/[^\d.\-]/g, '')) : 0;
+  if (v._alt && !f) {   // 隔一个数字屏换版式：大数在左，名字竖排在右
+    const vfs = fitSize(String(v.value), PORT ? 300 : 420, (PORT ? CW : CW * .62), .62 / .58);
+    return `<div class="${PORT ? 'col' : 'row'}" style="gap:${px(PORT ? 30 : 60)};align-items:${PORT ? 'flex-start' : 'center'}">
+      <div class="d" style="font-size:${px(vfs)};color:${T.fg};${slideIn(t, 0, -120)}">${esc(shown)}</div>
+      <div class="col" style="gap:${px(20)};${PORT ? '' : `max-width:${px(CW * .34)}`}">
+        <span style="width:${px(120)};height:${px(14)};background:${T.ac};${clipIn(t, .3, .3, 'L')}"></span>
+        <span style="font-size:${px(fitSize(label, PORT ? 70 : 76, PORT ? CW : CW * .34 * 1.9))};line-height:1.25;color:${T.fg};${slideIn(t, .35, 60, 0, .35, 8)}">${esc(label)}</span></div></div>`;
+  }
+  const lfs = fitSize(label, PORT ? 64 : 70, CW * .9);
+  const vfs = fitSize(String(v.value), PORT ? 300 : 360, CW * .9, .62 / .58);
+  const old = f ? `<div class="row nw" style="gap:${px(24)};margin:${px(6)} 0 ${px(34)};${blurIn(t, .1, .2)}">
+      <span class="d" style="position:relative;font-size:${px(PORT ? 100 : 120)};color:${T.dim}">${esc(v.from)}
+        <span class="abs" style="left:-4%;right:-4%;top:48%;height:${px(12)};background:${T.ac};${clipIn(t, .3, .25, 'L')}"></span></span>
+      <span class="d" style="font-size:${px(PORT ? 80 : 90)};color:${T.ac};${blurIn(t, .45, .2)}">→</span></div>` : '';
+  const bar = isPct ? `<div style="position:relative;width:${px(CW * (PORT ? 1 : .8))};height:${px(30)};background:${T.track};margin-top:${px(26)};${blurIn(t, .2, .2)}">
+      <div class="abs" style="left:0;top:0;bottom:0;width:${clamp(cur / 100) * 100}%;background:${T.ac}"></div></div>` : '';
+  return `<div class="col">
+    <div class="nw" style="font-size:${px(lfs)};color:${T.fg};margin-bottom:${px(10)};${slideIn(t, 0, -60, 0, .35, 8)}">${esc(label)}</div>
+    ${old}
+    <div class="d" style="font-size:${px(vfs)};color:${T.fg};line-height:1.05">${esc(shown)}</div>${bar}</div>`;
+}
+
+function vBars(v, t, d, T) {
+  const items = (v.items || []).slice(0, 6), n = items.length;
+  const nums = items.map((x) => parseFloat(x.value) || 0), max = Math.max(...nums, 1e-9);
+  const hl = v.highlight != null ? String(v.highlight) : null;
+  const rowH = PORT ? (n <= 4 ? 150 : 120) : (n <= 4 ? 118 : 96);
+  const nameW = Math.max(...items.map((x) => tw(x.name)), 2), nameMax = PORT ? 300 : 460;
+  const nfs = Math.min(PORT ? 64 : 70, (nameMax - 10) / nameW);
+  const rows = items.map((x, i) => {
+    const t0 = .2 + i * .1, isHl = hl ? String(x.name) === hl : nums[i] === max;
+    const col = isHl ? T.ac : (hl ? T.dim : T.fg);
+    const w = (PORT ? 62 : 76) * nums[i] / max;
+    return `<div class="row" style="height:${px(rowH)};gap:${px(26)};${slideIn(t, t0, 160, 0, .4, 12)}">
+      <div class="d nw" style="width:${px(nameW * nfs + 10)};font-size:${px(nfs)};color:${isHl ? T.ac : T.fg}">${esc(x.name)}</div>
+      <div style="flex:1;position:relative;height:${px(rowH * .42)}">
+        <div class="abs" style="left:0;top:0;bottom:0;width:${Math.max(w, .4)}%;background:${col};${clipIn(t, t0 + .1, .55, 'L', easeIO)}"></div>
+        <div class="abs d nw" style="left:calc(${Math.max(w, .4)}% + ${px(22)});top:50%;transform:translateY(-50%);font-size:${px(nfs * 1.1)};color:${isHl ? T.ac : T.fg};${blurIn(t, t0 + .65, .2)}">${esc(String(x.value))}${esc(x.unit || '')}</div></div></div>`;
+  }).join('');
+  const title = v.title ? `<div class="d" style="font-size:${px(fitSize(v.title, PORT ? 90 : 110, CW * .95))};color:${T.fg};margin-bottom:${px(30)}">${perChar(v.title, t, 0, .03)}</div>` : '';
+  return `<div class="col">${title}${rows}</div>`;
+}
+
+function vCompare(v, t, d, T) {
+  const L = v.left || {}, R = v.right || {}, pl = parseNum(L.value), pr = parseNum(R.value);
+  const num = pl && pr && pl.suf === pr.suf;
+  const winL = num && pl.n > pr.n, winR = num && pr.n > pl.n;
+  const half = PORT ? CW : (CW - 160) / 2;
+  const side = (o, win, dx, t0, al) => {
+    const nfs = fitSize(o.name, PORT ? 110 : 150, half), vfs = fitSize(String(o.value ?? ''), PORT ? 200 : 260, half, .62 / .58);
+    return `<div class="col" style="width:${px(half)};align-items:${al};${slideIn(t, t0, dx, 0, .45)}">
+      <div class="d" style="font-size:${px(nfs)};color:${T.fg}">${esc(o.name)}</div>
+      <div class="d" style="font-size:${px(vfs)};color:${win ? T.ac : T.fg};margin-top:${px(14)}">${esc(rollNum(o.value, 0, t, .3, 1.0))}</div>
+      ${o.note ? `<div class="nw" style="font-size:${px(PORT ? 46 : 52)};color:${T.fg};opacity:.75;margin-top:${px(14)}">${esc(o.note)}</div>` : ''}
+      ${win ? `<div style="width:${px(160)};height:${px(14)};background:${T.ac};margin-top:${px(20)};${clipIn(t, 1.2, .3, al === 'flex-end' ? 'R' : 'L')}"></div>` : ''}</div>`;
+  };
+  const vs = `<div class="d" style="font-size:${px(PORT ? 80 : 110)};color:${T.ac};${PORT ? 'margin:' + px(10) + ' 0' : 'width:' + px(160) + ';text-align:center'};${blurIn(t, .3, .2)}">vs</div>`;
+  let bar = '';
+  if (num && pl.n >= 0 && pr.n >= 0 && pl.n + pr.n > 0) {
+    const a = pl.n / (pl.n + pr.n) * 100;
+    bar = `<div class="row" style="height:${px(26)};margin-top:${px(40)};gap:${px(8)};${blurIn(t, .5, .2)}">
+      <div style="width:${a}%;height:100%;background:${winL ? T.ac : T.track};${clipIn(t, .6, .6, 'L', easeIO)}"></div>
+      <div style="flex:1;height:100%;background:${winR ? T.ac : T.track};${clipIn(t, .6, .6, 'R', easeIO)}"></div></div>`;
+  }
+  return `<div class="col"><div class="${PORT ? 'col' : 'row'}" style="align-items:center">${side(L, winL, -160, 0, 'flex-start')}${vs}${side(R, winR, 160, .08, PORT ? 'flex-start' : 'flex-end')}</div>${bar}</div>`;
+}
+
+function vList(v, t, d, T) {
+  const items = (v.items || []).slice(0, 5);
+  const gap = clamp((d - 1.0) / Math.max(items.length, 1), .2, .6);
+  const rows = items.map((x, i) => {
+    const t0 = .25 + i * gap;
+    return `<div class="row" style="gap:${px(36)};min-height:${px(PORT ? 130 : 112)};${slideIn(t, t0, 200, 0, .4, 12)}">
+      <div class="d" style="flex:none;width:${px(100)};font-size:${px(96)};color:${T.ac}">${i + 1}</div>
+      <div class="d" style="font-size:${px(fitSize(x, PORT ? 76 : 84, CW - 160))};color:${T.fg};white-space:normal;line-height:1.1">${esc(x)}</div></div>`;
+  }).join('');
+  const title = v.title ? `<div class="d" style="font-size:${px(fitSize(v.title, PORT ? 96 : 110, CW * .95))};color:${T.fg};margin-bottom:${px(26)}">${perChar(v.title, t, 0, .03)}</div>` : '';
+  return `<div class="col">${title}${rows}</div>`;
+}
+
+function vQuote(v, t, d, T) {
+  const chars = [...String(v.text || '')], n = chars.length;
+  const dur = Math.min(1.3, d * .45);
+  const fs = PORT ? (n <= 10 ? 150 : n <= 18 ? 120 : 92) : (n <= 12 ? 190 : n <= 20 ? 150 : 110);
+  const txt = chars.map((c, i) => `<span class="ch" style="${blurIn(t, .2 + i * dur / Math.max(n, 1), .14, 12)}">${esc(c)}</span>`).join('');
+  return `<div class="col" style="position:relative">
+    <div class="d abs" style="left:${px(-10)};top:${px(-fs * 1.2)};font-size:${px(fs * 1.8)};color:${T.ac};${blurIn(t, 0, .2)}">“</div>
+    <div class="d" style="font-size:${px(fs)};color:${T.fg};white-space:normal;line-height:1.12;max-width:${px(CW)}">${txt}</div>
+    ${v.who ? `<div style="font-size:${px(PORT ? 40 : 44)};color:${T.dim};margin-top:${px(40)};${blurIn(t, .3 + dur, .25)}">—— ${esc(v.who)}</div>` : ''}</div>`;
+}
+
+function vVote(v, t, d, T) {
+  const opts = (v.options || []).slice(0, 4), n = opts.length;
+  const cw = PORT ? (n <= 2 ? 400 : 400) : Math.min(420, (CW - (n - 1) * 40) / n);
+  const go = .5 + n * .1 + .4;
+  const chips = opts.map((o, i) => {
+    const on = t > go && Math.floor((t - go) / .5) % n === i;   // 都出来以后轮流点亮（换底色，不缩放）
+    return `<div class="row" style="justify-content:center;width:${px(cw)};height:${px(PORT ? 180 : 190)};outline:${px(8)} solid ${T.fg};outline-offset:${px(-8)};background:${on ? T.fg : 'transparent'};${slideIn(t, .45 + i * .1, 0, 70, .4, 10)}">
+      <span class="d" style="font-size:${px(fitSize(o, 110, cw - 50))};color:${on ? T.bg : T.fg}">${esc(o)}</span></div>`;
+  }).join('');
+  const grid = PORT && n > 2 ? `<div style="display:grid;grid-template-columns:repeat(2,${px(cw)});gap:${px(40)}">${chips}</div>` : `<div class="row" style="gap:${px(40)}">${chips}</div>`;
+  return `<div class="col" style="gap:${px(70)}">
+    <div class="d" style="font-size:${px(fitSize(v.question, PORT ? 180 : 220, CW * .95))};color:${T.fg}">${perChar(v.question, t, 0, .06)}</div>${grid}</div>`;
+}
+
+const DRAW = { title: vTitle, number: vNumber, bars: vBars, compare: vCompare, list: vList, quote: vQuote, vote: vVote };
+{ let n = 0; for (const x of SP.scenes) if ((x.visual || {}).type === 'number') x.visual._alt = n++ % 2 === 1; }
+
+// 一屏的完整画面（底色 + 角标 + 内容）
+function scenePage(i, lt) {
+  const sc = SP.scenes[i], v = sc.visual || {}, T = THEME(i);
+  const draw = DRAW[v.type] || vTitle;
+  const kick = v.kicker ? `<div class="abs nw" style="${PORT ? `left:${px(70)};top:${px(150)}` : `left:${px(100)};top:${px(52)}`};font-size:${px(PORT ? 42 : 40)};color:${T.fg};${slideIn(lt, 0, -40, 0, .3, 6)}">
+      <span style="display:inline-block;width:${px(10)};height:${px(34)};background:${T.ac};vertical-align:middle;margin-right:${px(16)}"></span>${esc(v.kicker)}</div>` : '';
+  return `<div class="layer" style="background:${T.bg}">
+    <div class="page" style="left:${px(AREA.l)};right:${px(AREA.r)};top:${px(AREA.t)};bottom:${px(AREA.b)}">${draw(v, lt, sc.dur, T)}</div>${kick}</div>`;
+}
+
+const GRAIN = `<svg id="grain" width="100%" height="100%"><filter id="nz"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" seed="7" stitchTiles="stitch"/><feColorMatrix values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 .9 0"/></filter><rect width="100%" height="100%" filter="url(#nz)"/></svg>`;
+const DIRS = ['U', 'L', 'R', 'D'];
+
+window.render = (t) => {
+  const { i, sc, lt } = sceneAt(t);
+  // 换屏：新的一屏整块色板从某个方向擦进来（方向轮换），底下垫着上一屏的最后一帧
+  let html;
+  const TR = .36;
+  if (i > 0 && lt < TR) {
+    const prev = SP.scenes[i - 1];
+    html = scenePage(i - 1, prev.dur + lt) + `<div class="layer" style="${clipIn(lt, 0, TR, DIRS[i % 4], easeIO) || ''}">${scenePage(i, lt)}</div>`;
+  } else html = scenePage(i, lt);
+  const T = THEME(i);
+  const corner = SP.corner ? `<div class="abs nw" style="right:${px(PORT ? 150 : 60)};top:${px(PORT ? 70 : 44)};font-size:${px(PORT ? 30 : 28)};padding:${px(6)} ${px(18)};outline:${px(3)} solid ${T.fg};outline-offset:${px(-3)};color:${T.fg}">${esc(SP.corner)}</div>` : '';
+  let cap = '';
+  if (sc.caption) {
+    const av = SP.avatar ? `<span style="position:relative;flex:none;width:${px(96)};height:${px(96)};border-radius:50%;overflow:hidden;background:${PAPER};border:${px(4)} solid ${T.plate}"><img src="${esc(SP.avatar)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 30%"></span>` : '';
+    const fs = fitSize(sc.caption, PORT ? 56 : 52, (PORT ? 760 : 1400));
+    const pos = PORT ? `left:${px(70)};bottom:${px(470)}` : `left:${px(56)};bottom:${px(40)}`;
+    cap = `<div class="abs row" style="${pos};gap:${px(18)}">${av}<span class="nw" style="font-size:${px(fs)};padding:${px(10)} ${px(26)};background:${T.plate};color:${T.plateFg}">${esc(sc.caption)}</span></div>`;
+  }
+  S.innerHTML = html + GRAIN + corner + cap;
+  return true;
+};
+// 先把得意黑加载好再截第一帧（字体只有用到时才下载）
+window.PRELOAD = Promise.all([window.PRELOAD, document.fonts.load(`400 100px Smiley`, '热点Agent0123456789%')]);
+window.PRELOAD.then(() => window.render(0));
+</script>
+</body>
+</html>
