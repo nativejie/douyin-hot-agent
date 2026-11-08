@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>cover</title>
+<script src="cover_spec.js"></script>
+<style>
+  /* 封面：纸面风格，不放大脸。左边（竖版是上面）：绿标签 + 一行事由 + 超大的数（荧光笔垫底）+ 一行结论；
+     右边（竖版是下面）：成片里两张最有画面感的定格（条形图、对比），裁掉角标和字幕胶囊，错开叠放。
+     字是网页排的，一个字都不会错。 */
+  :root { --paper: #ece8df; --dot: #d9d4c8; --ink: #17181a; --ink2: #3c3e42; --green: #2fa35a; --mark: #bfe8cb;
+    --head: "Source Han Sans CN", "Source Han Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { overflow: hidden; }
+  body { position: relative; font-family: var(--head); color: var(--ink); -webkit-font-smoothing: antialiased; background-color: var(--paper);
+    background-image: radial-gradient(var(--dot) 2.4px, transparent 2.6px); background-size: 40px 40px; background-position: 8px 8px; }
+  .abs { position: absolute; white-space: nowrap; }
+  .t { font-weight: 900; line-height: 1.05; -webkit-text-stroke: .018em currentColor; }
+  .mark { position: relative; display: inline-block; z-index: 0; }
+  .mark::after { content: ""; position: absolute; left: -.06em; right: -.06em; bottom: 6%; height: 34%; background: var(--mark); border-radius: .05em; z-index: -1; }
+  .tag { display: inline-block; background: var(--green); color: #fff; font-weight: 900; border-radius: 999px; }
+  .card { position: absolute; background: #fff; border: 8px solid #fff; border-radius: 22px; overflow: hidden; box-shadow: 0 22px 50px rgba(40, 34, 20, .28); }
+  .card .in { position: relative; width: 100%; height: 100%; overflow: hidden; border-radius: 14px; }
+  /* 定格图下面有字幕胶囊：只留 5%–83% */
+  .card img { position: absolute; left: 0; top: -6.4%; width: 100%; height: 128.2%; }
+  .lab { position: absolute; right: 14px; bottom: 12px; padding: 4px 18px; border-radius: 999px; background: var(--ink); color: #fff; font-weight: 800; }
+</style>
+</head>
+<body>
+<div id="c"></div>
+<script>
+const C = window.COVER, W = C.w, H = C.h, PORT = H > W;
+document.body.style.width = W + 'px'; document.body.style.height = H + 'px';
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const tw = (s) => [...String(s ?? '')].reduce((a, c) => a + (/[\x00-\xff]/.test(c) ? .58 : 1), 0) || 1;
+const lines = C.lines || [], big = C.big ?? 1;
+const pre = lines.slice(0, big).join(' '), num = lines[big] || '', post = lines.slice(big + 1).join('，');
+const shots = (C.shots || []).slice(0, 2);
+const AR = 16 / (9 * .78);   // 裁过的定格图宽高比
+
+// 文字区和画面区
+const M = PORT ? 76 : Math.round(W * .05);
+const tbox = PORT ? { x: M, y: 70, w: W - 2 * M, h: H * (shots.length ? .4 : .86) } : { x: M, y: 0, w: (shots.length ? W * .5 - M + 10 : W - 2 * M), h: H };
+const pbox = PORT ? { x: M - 10, y: tbox.y + tbox.h + 30, w: W - 2 * M + 20, h: H - (tbox.y + tbox.h + 30) - 60 }
+                  : { x: W * .5 + 30, y: 60, w: W * .5 - 30 - M + 10, h: H - 120 };
+
+// 字号：先按宽，再按高
+const fsT = PORT ? 40 : Math.min(44, H * .045);
+let fs1 = Math.min(PORT ? 72 : 76, tbox.w / tw(pre)), fs3 = Math.min(PORT ? 72 : 80, tbox.w / tw(post)), fsN = Math.min(PORT ? 330 : 400, tbox.w * .94 / tw(num));
+const need = () => (C.tag ? fsT * 2.1 : 0) + fs1 * 1.35 + fsN * 1.1 + (post ? fs3 * 1.3 : 0);
+const room = tbox.h - (PORT ? 0 : H * .16);
+if (need() > room) { const k = room / need(); fs1 *= k; fs3 *= k; fsN *= k; }
+let y = PORT ? tbox.y : (H - need()) / 2;
+let html = '';
+if (C.tag) { html += `<div class="abs" style="left:${tbox.x}px;top:${y}px"><span class="tag" style="font-size:${fsT}px;padding:${fsT * .22}px ${fsT * .6}px">${esc(C.tag)}</span></div>`; y += fsT * 2.1; }
+html += `<div class="abs t" style="left:${tbox.x}px;top:${y}px;font-size:${fs1}px;color:var(--ink2)">${esc(pre)}</div>`; y += fs1 * 1.35;
+html += `<div class="abs t" style="left:${tbox.x - fsN * .04}px;top:${y}px;font-size:${fsN}px"><span class="mark">${esc(num)}</span></div>`; y += fsN * 1.1;
+if (post) html += `<div class="abs t" style="left:${tbox.x}px;top:${y}px;font-size:${fs3}px">${esc(post)}</div>`;
+
+// 画面：两张错开叠放（横版上下错开，竖版左右错开）
+if (shots.length) {
+  const n = shots.length, off = PORT ? 0 : pbox.w * .08;
+  let cw = PORT ? pbox.w * (n > 1 ? .92 : 1) : pbox.w - off, ch = cw / AR;
+  const gapY = PORT ? 26 : 34;
+  if (n * ch + (n - 1) * gapY > pbox.h) { ch = (pbox.h - (n - 1) * gapY) / n; cw = ch * AR; }
+  const totalH = n * ch + (n - 1) * gapY, y0 = pbox.y + (pbox.h - totalH) / 2;
+  shots.forEach((s, i) => {
+    const x = PORT ? pbox.x + (i % 2 ? pbox.w - cw : 0) : pbox.x + pbox.w - cw - (i % 2 ? off : 0);
+    html += `<div class="card" style="left:${x}px;top:${y0 + i * (ch + gapY)}px;width:${cw}px;height:${ch}px;z-index:${i + 1}">
+      <div class="in"><img src="${esc(s.src)}">${s.label ? `<span class="lab" style="font-size:${Math.max(22, ch * .085)}px">${esc(s.label)}</span>` : ''}</div></div>`;
+  });
+}
+document.getElementById('c').innerHTML = html;
+</script>
+</body>
+</html>

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>hot-render</title>
+<script src="spec.js"></script>
+<style>
+  /* 纸面风格：米色点阵底、白色圆角卡片、墨色大字、绿色强调、顶上角标、底部黑色字幕胶囊。
+     所有尺寸都乘 K（横屏 1，竖屏按宽度缩），用 flex 排版。 */
+  :root {
+    --paper: #ebe9e1; --dot: #d6d4ca; --card: #ffffff; --edge: #d2d0c6;
+    --ink: #141517; --ink2: #4d4f54; --ink3: #8d8f94;
+    --green: #2fb35f; --green2: #1c8a45; --mark: #bfecce; --dark: #1f2124; --light: #c9c6bb;
+    --shadow: 0 12px 34px rgba(30, 30, 20, .13);
+    --head: "Source Han Sans SC", "Source Han Sans CN", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { overflow: hidden; background: var(--paper); }
+  body { font-family: var(--head); color: var(--ink); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
+  #stage { position: absolute; inset: 0; overflow: hidden; background-color: var(--paper);
+    background-image: radial-gradient(var(--dot) calc(2.4px * var(--k)), transparent calc(2.6px * var(--k))); background-size: calc(40px * var(--k)) calc(40px * var(--k)); }
+  .abs { position: absolute; }
+  .page { position: absolute; display: flex; flex-direction: column; justify-content: center; align-items: stretch; }
+  .pc { position: relative; flex: none; background: var(--card); border: calc(2.5px * var(--k)) solid var(--edge); border-radius: calc(26px * var(--k)); box-shadow: var(--shadow); }
+  .row { display: flex; align-items: center; }
+  .col { display: flex; flex-direction: column; }
+  .base { display: flex; align-items: baseline; justify-content: center; }
+  .b { font-weight: 900; line-height: 1.05; }
+  .w8 { font-weight: 800; line-height: 1.1; }
+  .mut { color: var(--ink3); font-weight: 700; line-height: 1.15; }
+  .green { color: var(--green); }
+  .nw { white-space: nowrap; }
+  .mark { position: relative; display: inline-block; z-index: 0; }
+  .mark::after { content: ""; position: absolute; left: -4%; bottom: 4%; height: 30%; width: calc(108% * var(--mk, 1)); background: var(--mark); border-radius: 8px; z-index: -1; }
+  #kicker { position: absolute; font-weight: 800; color: var(--ink2); white-space: nowrap; }
+  #corner { position: absolute; left: 50%; transform: translateX(-50%); border-radius: 999px; background: #fff; border: 2px solid var(--green); color: var(--green2); font-weight: 800; white-space: nowrap; }
+  #cap { position: absolute; display: flex; align-items: center; border-radius: 999px; background: var(--ink); color: #fff; font-weight: 800; white-space: nowrap; }
+  #cap .av { position: relative; border-radius: 50%; overflow: hidden; background: #fff; flex: none; border: 3px solid var(--green); }
+  #cap .av img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 50% 30%; transform: scale(1.12); }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+const SP = window.SPEC;
+const W = SP.w, H = SP.h, PORT = H > W;
+const K = PORT ? W / 1080 : W / 1920;          // 竖屏的设计宽度按 1080 算
+const px = (n) => (n * K).toFixed(1) + 'px';
+document.documentElement.style.setProperty('--k', K);
+document.body.style.width = W + 'px'; document.body.style.height = H + 'px';
+const S = document.getElementById('stage');
+
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const ease = (x) => { x = clamp(x); return 1 - Math.pow(1 - x, 3); };
+const easeIO = (x) => { x = clamp(x); return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+const pop = (t, t0, dur = .35, dy = 30) => { const k = ease((t - t0) / dur); return `opacity:${k.toFixed(3)};transform:translateY(${((1 - k) * dy * K).toFixed(1)}px);`; };
+const slide = (t, t0, dx, dur = .4) => { const k = ease((t - t0) / dur); return `opacity:${k.toFixed(3)};transform:translateX(${((1 - k) * dx * K).toFixed(1)}px);`; };
+const fade = (t, t0, dur = .3) => `opacity:${ease((t - t0) / dur).toFixed(3)};`;
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let NOW = 0;
+// 条形里缓慢移动的斜纹：让静止的画面也有一点动
+const STRIPE = () => `background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.16) 0 ${px(18)},transparent ${px(18)} ${px(36)});background-size:${px(51)} ${px(51)};background-position:${((NOW * 60 * K) % (51 * K)).toFixed(1)}px 0;`;
+
+// 「49.4%」「-3」「1.2万」能滚动；「3:1」「11月9日」这种不滚
+function parseNum(v) {
+  const s = String(v ?? '');
+  const m = s.match(/^([^\d\-+]*?)([\-+]?\d+(?:\.\d+)?)([^\d]*)$/);
+  if (!m) return null;
+  const dec = (m[2].split('.')[1] || '').length;
+  return { pre: m[1], n: parseFloat(m[2]), suf: m[3], dec };
+}
+const fmtNum = (p, n) => p.pre + n.toFixed(p.dec) + p.suf;
+// 字号按字数自动缩：最长的那行不超出宽度
+const tw = (text) => [...String(text ?? '')].reduce((a, c) => a + (/[\x00-\xff]/.test(c) ? .58 : 1), 0);   // 按字宽估算（汉字 1，英文数字 0.58）
+const fitSize = (text, maxPx, widthPx, ratio = 1) => Math.min(maxPx, widthPx / (tw(text) || 1) / ratio);
+
+// 页面区域（设计坐标）
+// 竖屏：底部约 20% 是抖音的作者名和标题，右边一列是点赞评论按钮，内容和字幕都躲开
+const AREA = PORT ? { l: 70, r: 130, t: 230, b: 620, w: 880 } : { l: 90, r: 90, t: 120, b: 225, w: 1740 };
+
+// ---------- 七种画面 ----------
+function vTitle(v, t, d) {
+  const text = String(v.text || '');
+  const vs = text.match(/^(.+?)\s+(vs|VS|对|vs\.)\s+(.+)$/);
+  const mk = ease((t - .35) / .5);
+  let main;
+  if (vs) {
+    const fs = fitSize(vs[1] + vs[3] + '  ', PORT ? 200 : 210, AREA.w * .86);
+    main = `<div class="base nw" style="gap:${px(50)}">
+      <span class="b" style="font-size:${px(fs)};${slide(t, 0, -120)}">${esc(vs[1])}</span>
+      <span class="b mut" style="font-size:${px(fs * .45)};${fade(t, .25)}">VS</span>
+      <span class="b" style="font-size:${px(fs)};${slide(t, 0, 120)}">${esc(vs[3])}</span></div>`;
+  } else {
+    const fs = fitSize(text, PORT ? 170 : 180, AREA.w * .9);
+    main = `<div class="b" style="text-align:center;font-size:${px(fs)};${pop(t, 0, .4, 40)}"><span class="mark" style="--mk:${mk.toFixed(3)}">${esc(text)}</span></div>`;
+  }
+  const sub = v.sub ? `<div class="row" style="justify-content:center;${pop(t, .45)}"><span class="w8" style="font-size:${px(PORT ? 54 : 56)};color:var(--ink2);background:#fff;border:${px(2.5)} solid var(--edge);border-radius:999px;padding:${px(12)} ${px(40)}">${esc(v.sub)}</span></div>` : '';
+  return `<div class="col" style="gap:${px(54)};align-items:center">${main}${sub}</div>`;
+}
+
+function vNumber(v, t, d) {
+  const p = parseNum(v.value), f = parseNum(v.from ?? 0);
+  const k = easeIO((t - .25) / 1.1);
+  let shown = String(v.value ?? '');
+  if (p) shown = fmtNum(p, (f ? f.n : 0) + (p.n - (f ? f.n : 0)) * k);
+  const label = String(v.label || '');
+  const lfs = fitSize(label, PORT ? 62 : 64, (PORT ? 860 : 1300));
+  const vfs = fitSize(String(v.value ?? ''), PORT ? 250 : 280, PORT ? 860 : 1300, .62 / .58);
+  const isPct = p && p.suf.trim() === '%' && p.n <= 100 && p.n >= 0;
+  const barW = isPct ? ((f ? f.n : 0) + (p.n - (f ? f.n : 0)) * k) : 0;
+  const old = v.from != null && f && f.n !== 0
+    ? `<div class="base nw" style="gap:${px(18)};${fade(t, .1)}"><span class="b" style="font-size:${px(70)};color:var(--ink3);text-decoration:line-through;text-decoration-thickness:${px(6)}">${esc(v.from)}</span><span class="b mut" style="font-size:${px(56)}">→</span></div>` : '';
+  const up = f && p ? p.n >= f.n : true;
+  // 连着几屏都是单个数字时换个版式：百分比用圆环
+  if (isPct && !old && v._alt) {
+    const D = PORT ? 600 : 600, ring = D * .11;
+    return `<div class="${PORT ? 'col' : 'row'}" style="align-self:center;align-items:center;gap:${px(PORT ? 60 : 90)};${pop(t, 0)}">
+      <div style="position:relative;flex:none;width:${px(D)};height:${px(D)};border-radius:50%;background:conic-gradient(var(--green) ${barW * 3.6}deg, var(--edge) 0);box-shadow:var(--shadow)">
+        <div class="abs" style="inset:${px(ring)};border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center">
+          <span class="b nw green" style="font-size:${px(fitSize(String(v.value), 160, D - ring * 2 - 110, .62 / .58))}">${esc(shown)}</span></div></div>
+      ${(() => {   // 一行放得下（字号不小于 64）就不折行，放不下再按两行排
+        const lw = PORT ? 940 : 840, one = fitSize(label, PORT ? 96 : 104, lw);
+        const fs = one >= 64 ? one : fitSize(label, PORT ? 96 : 104, lw * 1.9);
+        return `<div class="b ${one >= 64 ? 'nw' : ''}" style="font-size:${px(fs)};max-width:${px(lw)};line-height:1.25;word-break:keep-all;${PORT ? 'text-align:center' : ''}">${esc(label)}</div>`;
+      })()}</div>`;
+  }
+  if (!isPct && !old && v._alt) {
+    return `<div class="col" style="align-self:center;align-items:center;gap:${px(40)};${pop(t, 0)}">
+      <div class="b" style="font-size:${px(fitSize(label, PORT ? 80 : 88, PORT ? 900 : 1500))};color:var(--ink2);text-align:center">${esc(label)}</div>
+      <div class="b nw green" style="font-size:${px(fitSize(String(v.value ?? ''), PORT ? 260 : 320, PORT ? 900 : 1500, .62 / .58))}"><span class="mark" style="--mk:${ease((t - .9) / .5).toFixed(3)}">${esc(shown)}</span></div></div>`;
+  }
+  return `<div class="pc col" style="align-self:center;width:${px(PORT ? 960 : 1400)};padding:${px(54)} ${px(70)} ${px(60)};gap:${px(30)};align-items:center;${pop(t, 0)}">
+    <div class="w8" style="font-size:${px(lfs)};text-align:center;color:var(--ink2)">${esc(label)}</div>
+    ${old}
+    <div class="b nw ${up ? 'green' : ''}" style="font-size:${px(vfs)};${up ? '' : 'color:var(--ink)'}">${esc(shown)}</div>
+    ${isPct ? `<div style="width:100%;height:${px(30)};border-radius:${px(15)};background:var(--edge);overflow:hidden"><div style="height:100%;width:${barW}%;background:var(--green);${STRIPE()}"></div></div>` : ''}</div>`;
+}
+
+function vBars(v, t, d) {
+  const items = (v.items || []).slice(0, 6);
+  const nums = items.map((x) => parseFloat(x.value) || 0);
+  const max = Math.max(...nums, 1e-9);
+  const hl = v.highlight != null ? String(v.highlight) : null;
+  const n = items.length;
+  const rowH = PORT ? (n <= 4 ? 150 : 118) : (n <= 4 ? 120 : 94);
+  const nameW = Math.max(...items.map((x) => tw(x.name)), 2);
+  const nameMax = PORT ? 300 : 470;
+  const nfs = Math.min(PORT ? (n <= 4 ? 58 : 50) : (n <= 4 ? 60 : 52), (nameMax - 10) / nameW);
+  const nameBox = Math.min(nameMax, nameW * nfs + 10);
+  const rows = items.map((x, i) => {
+    const t0 = .15 + i * .12, k = easeIO((t - t0) / .9);
+    const isHl = hl ? String(x.name) === hl : nums[i] === max;
+    const col = isHl ? 'var(--green)' : (hl ? 'var(--light)' : 'var(--dark)');
+    const w = (PORT ? 58 : 74) * (nums[i] / max) * k;
+    const p = parseNum(x.value);
+    const lab = String(x.value);
+    const pulse = isHl && t > t0 + 1 ? (1 + .03 * Math.sin((t - t0) * 6)).toFixed(4) : 1;
+    return `<div class="row" style="height:${px(rowH)};gap:${px(26)};${pop(t, t0, .3, 0)}">
+      <div class="${isHl ? 'b' : 'w8'} nw" style="width:${px(nameBox)};text-align:right;font-size:${px(nfs)};${isHl ? 'color:var(--green2)' : ''}">${esc(x.name)}</div>
+      <div style="flex:1;height:${px(rowH * .56)};position:relative">
+        <div class="abs" style="left:0;top:0;bottom:0;width:${Math.max(w, .4)}%;border-radius:${px(12)};background:${col};${STRIPE()}${isHl ? `box-shadow:0 0 0 ${px(6)} rgba(47,179,95,.22);` : ''}"></div>
+        <div class="abs b nw" style="left:calc(${Math.max(w, .4)}% + ${px(22)});top:0;bottom:0;display:flex;align-items:center;font-size:${px(nfs * 1.05)};opacity:${ease((t - t0 - .5) / .35).toFixed(3)};${isHl ? `color:var(--green2);transform:scale(${pulse});transform-origin:left center;` : ''}">${esc(lab)}${esc(x.unit || '')}</div></div></div>`;
+  }).join('');
+  const title = v.title ? `<div class="b" style="font-size:${px(fitSize(v.title, PORT ? 72 : 76, AREA.w * .9))};${pop(t, 0)}">${esc(v.title)}</div>` : '';
+  return `<div class="col" style="gap:${px(30)};${PORT ? 'justify-content:center' : 'height:100%'}">${title}
+    <div class="pc col" style="${PORT ? 'flex:none' : 'flex:1'};justify-content:center;padding:${px(PORT ? 40 : 26)} ${px(PORT ? 40 : 60)}">${rows}</div></div>`;
+}
+
+function vCompare(v, t, d) {
+  const L = v.left || {}, R = v.right || {};
+  const pl = parseNum(L.value), pr = parseNum(R.value);
+  const k = easeIO((t - .3) / 1.0);
+  const num = pl && pr && pl.suf === pr.suf;
+  const winL = num ? pl.n > pr.n : false, winR = num ? pr.n > pl.n : false;
+  const side = (o, p, win, dx, t0) => {
+    const shown = p ? fmtNum(p, p.n * k) : String(o.value ?? '');
+    const nfs = fitSize(o.name, PORT ? 76 : 110, PORT ? 760 : 700);
+    const vfs = fitSize(String(o.value ?? ''), PORT ? 150 : 200, PORT ? 760 : 700, .62 / .58);
+    return `<div class="pc col" style="flex:1;align-items:center;justify-content:center;gap:${px(PORT ? 14 : 22)};padding:${px(PORT ? 26 : 44)} ${px(30)};${win ? `border-color:var(--green);border-width:${px(5)};` : ''}${PORT ? pop(t, t0) : slide(t, t0, dx)}">
+      <div class="b nw" style="font-size:${px(nfs)}">${esc(o.name)}</div>
+      <div class="b nw ${win ? 'green' : ''}" style="font-size:${px(vfs)};${win ? '' : 'color:var(--ink2)'}">${esc(shown)}</div>
+      ${o.note ? `<div class="mut nw" style="font-size:${px(PORT ? 38 : 44)}">${esc(o.note)}</div>` : ''}</div>`;
+  };
+  const vs = `<div class="b mut nw" style="font-size:${px(PORT ? 46 : 60)};text-align:center;align-self:center;${PORT ? '' : `width:${px(110)};`}${fade(t, .3)}">VS</div>`;
+  let bar = '';
+  if (num && pl.n >= 0 && pr.n >= 0 && pl.n + pr.n > 0) {
+    const a = pl.n / (pl.n + pr.n) * 100;
+    bar = `<div style="height:${px(40)};border-radius:${px(20)};overflow:hidden;background:var(--edge);position:relative;flex:none;${fade(t, .4)}">
+      <div class="abs" style="left:0;top:0;bottom:0;width:${a * k}%;background:${winL ? 'var(--green)' : 'var(--dark)'};${STRIPE()}"></div>
+      <div class="abs" style="right:0;top:0;bottom:0;width:${(100 - a) * k}%;background:${winR ? 'var(--green)' : 'var(--light)'};${STRIPE()}"></div></div>`;
+  }
+  return `<div class="col" style="gap:${px(PORT ? 28 : 36)}"><div class="${PORT ? 'col' : 'row'}" style="gap:${px(PORT ? 12 : 30)};align-items:stretch">${side(L, pl, winL, -100, 0)}${vs}${side(R, pr, winR, 100, .1)}</div>${bar}</div>`;
+}
+
+function vList(v, t, d) {
+  const items = (v.items || []).slice(0, 5);
+  const gap = clamp((d - 1.0) / Math.max(items.length, 1), .25, .7);
+  const fs = PORT ? 60 : 64;
+  const rows = items.map((x, i) => {
+    const t0 = .35 + i * gap;
+    const on = t >= t0;
+    return `<div class="row" style="gap:${px(30)};${on ? pop(t, t0, .3, 20) : 'opacity:0'}">
+      <div class="b" style="flex:none;width:${px(86)};height:${px(86)};border-radius:50%;background:var(--green);color:#fff;display:flex;align-items:center;justify-content:center;font-size:${px(50)}">${i + 1}</div>
+      <div class="w8" style="font-size:${px(fitSize(x, fs, (PORT ? 760 : 1300)))}">${esc(x)}</div></div>`;
+  }).join('');
+  const title = v.title ? `<div class="b" style="font-size:${px(fitSize(v.title, PORT ? 84 : 88, AREA.w * .9))};${pop(t, 0)}">${esc(v.title)}</div>` : '';
+  return `<div class="col" style="gap:${px(34)}">${title}<div class="pc col" style="padding:${px(48)} ${px(70)};gap:${px(PORT ? 44 : 36)};${pop(t, .05)}">${rows}</div></div>`;
+}
+
+function vQuote(v, t, d) {
+  const chars = [...String(v.text || '')];
+  const n = chars.length;
+  const dur = Math.min(1.4, d * .45);
+  const shown = Math.round(n * clamp((t - .2) / dur));
+  const fs = PORT ? (n <= 14 ? 88 : n <= 24 ? 74 : 62) : (n <= 16 ? 96 : n <= 28 ? 80 : 66);
+  // 卡片宽度按折行后的实际行宽算：折成几行就按几行平均分，右边不留大片空白
+  const maxW = PORT ? 960 : 1500, inner = maxW - 160, full = tw(v.text) * fs * 1.02;
+  const nLines = Math.max(1, Math.ceil(full / inner));
+  const qw = Math.max(PORT ? 760 : 1000, Math.min(maxW, full / nLines + 160 + fs));
+  const txt = esc(chars.slice(0, shown).join('')) + `<span style="opacity:0">${esc(chars.slice(shown).join(''))}</span>`;
+  return `<div class="pc col" style="align-self:center;width:${px(qw)};padding:${px(70)} ${px(80)} ${px(60)};gap:${px(36)};${pop(t, 0)}">
+    <div class="b green abs" style="left:${px(36)};top:${px(-30)};font-size:${px(220)};line-height:1;font-family:Georgia,serif">“</div>
+    <div class="w8" style="font-size:${px(fs)};line-height:1.35;padding-top:${px(20)};text-wrap:balance">${txt}</div>
+    ${v.who ? `<div class="mut" style="font-size:${px(42)};text-align:right;${fade(t, .2 + dur)}">—— ${esc(v.who)}</div>` : ''}</div>`;
+}
+
+function vVote(v, t, d) {
+  const opts = (v.options || []).slice(0, 4);
+  const n = opts.length;
+  const cw = PORT ? (n <= 2 ? 420 : 420) : Math.min(380, (AREA.w - (n - 1) * 34) / n);
+  const chips = opts.map((o, i) => {
+    const t0 = .35 + i * .12;
+    const s = t > t0 + .4 ? (1 + .02 * Math.sin((t - t0) * 5 + i * 1.6)).toFixed(4) : 1;
+    return `<div style="${pop(t, t0, .3, 30)}"><div class="pc col" style="width:${px(cw)};height:${px(PORT ? 190 : 200)};align-items:center;justify-content:center;border-radius:${px(30)};transform:scale(${s})">
+      <div class="b nw" style="font-size:${px(fitSize(o, 90, cw - 40))}">${esc(o)}</div></div></div>`;
+  }).join('');
+  const grid = PORT && n > 2
+    ? `<div style="display:grid;grid-template-columns:repeat(2,${px(cw)});gap:${px(34)};justify-content:center">${chips}</div>`
+    : `<div class="row" style="gap:${px(34)};justify-content:center">${chips}</div>`;
+  return `<div class="col" style="gap:${px(70)};align-items:center">
+    <div class="b" style="font-size:${px(fitSize(v.question, PORT ? 140 : 150, AREA.w * .9))};${pop(t, 0, .4, 40)}"><span class="mark" style="--mk:${ease((t - .3) / .5).toFixed(3)}">${esc(v.question)}</span></div>${grid}</div>`;
+}
+
+const DRAW = { title: vTitle, number: vNumber, bars: vBars, compare: vCompare, list: vList, quote: vQuote, vote: vVote };
+
+// ---------- 每一帧 ----------
+window.TOTAL = SP.total;
+{ let n = 0; for (const x of SP.scenes) if ((x.visual || {}).type === 'number') x.visual._alt = n++ % 2 === 1; }   // 数字屏隔一个换圆环版式
+window.render = (t) => {
+  NOW = t;
+  const sc = SP.scenes.find((x) => t >= x.t0 && t < x.t0 + x.dur) || SP.scenes[SP.scenes.length - 1];
+  // 第一屏提前 1.6 秒开始动画（数字、条形都已经停住）：视频第一帧（刷到时看到的那帧）不能是空的；其余每屏提前 0.1 秒，切过去那一帧不闪空白
+  const lt = t - sc.t0 + (sc === SP.scenes[0] ? 1.6 : .1), v = sc.visual || {};
+  const draw = DRAW[v.type] || vTitle;
+  const drift = (t * 6 * K).toFixed(1);
+  S.style.backgroundPosition = `${drift}px ${drift}px`;
+  const zoom = (1 + .035 * easeIO(lt / sc.dur)).toFixed(4);   // 每屏慢慢推近一点，画面不会完全停住
+  const page = `<div class="page" style="left:${px(AREA.l)};right:${px(AREA.r)};top:${px(AREA.t)};bottom:${px(AREA.b)};transform:scale(${zoom});transform-origin:50% 45%">${draw(v, lt, sc.dur)}</div>`;
+  const kick = v.kicker ? `<div id="kicker" style="${PORT ? `left:${px(70)};top:${px(140)};font-size:${px(50)}` : `left:${px(90)};top:${px(30)};font-size:${px(46)}`};${fade(lt, 0, .25)}">${esc(v.kicker)}</div>` : '';
+  const corner = SP.corner ? `<div id="corner" style="top:${px(PORT ? 70 : 30)};padding:${px(8)} ${px(26)};font-size:${px(PORT ? 34 : 30)};letter-spacing:${px(2)}">${esc(SP.corner)}</div>` : '';
+  let cap = '';
+  if (sc.caption) {
+    const av = SP.avatar ? `<span class="av" style="width:${px(PORT ? 96 : 92)};height:${px(PORT ? 96 : 92)}"><img src="${esc(SP.avatar)}"></span>` : '';
+    const fs = fitSize(sc.caption, PORT ? 60 : 66, (PORT ? 760 : 1500) - (SP.avatar ? 120 : 0));
+    const k = ease(lt / .25);
+    const pos = PORT ? `left:${px(70 + 880 / 2)};bottom:${px(450)};transform:translateX(-50%) translateY(${((1 - k) * 24 * K).toFixed(1)}px)` : `left:${px(60)};bottom:${px(48)};transform:translateY(${((1 - k) * 24 * K).toFixed(1)}px)`;
+    cap = `<div id="cap" style="${pos};opacity:${k.toFixed(3)};gap:${px(24)};padding:${px(10)} ${px(48)} ${px(10)} ${px(SP.avatar ? 10 : 48)};font-size:${px(fs)};min-height:${px(PORT ? 116 : 112)}">${av}<span>${esc(sc.caption)}</span></div>`;
+  }
+  S.innerHTML = page + kick + corner + cap;
+  return true;
+};
+const imgs = SP.avatar ? [new Promise((r) => { const im = new Image(); im.onload = im.onerror = r; im.src = SP.avatar; })] : [];
+window.PRELOAD = Promise.all(imgs);
+document.fonts.ready.then(() => window.PRELOAD).then(() => window.render(0));
+</script>
+</body>
+</html>
