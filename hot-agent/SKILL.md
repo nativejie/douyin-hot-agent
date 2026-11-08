@@ -1,6 +1,6 @@
 ---
 name: hot-agent
-description: 追热点 Agent：一句话从抖音热榜一路做到成片。依次调用 6 个 skill——抓热点（hot-topics）→ 值不值得做（hot-score）→ 拆同题爆款（hot-breakdown）→ 查事实写稿（hot-script）→ 出画面（hot-render）→ 封面标题（hot-publish），最后交出一条能直接发的视频、三张封面和发布文案。用户说「追个热点」「今天做一条」「帮我从热榜做一条视频」「跑一遍追热点 Agent」「继续做今天那条」时使用。要环境变量 TIKHUB_API_KEY、Node 22+、Chrome。
+description: 追热点 Agent：一句话从抖音热榜（加 B 站热搜）一路做到成片。依次调用 6 个 skill——抓热点（hot-topics）→ 值不值得做（hot-score）→ 拆同题爆款（hot-breakdown）→ 查事实写稿（hot-script）→ 出画面（hot-render）→ 封面标题（hot-publish），最后交出一条能直接发的视频、三张封面和发布文案。用户说「追个热点」「今天做一条」「帮我从热榜做一条视频」「跑一遍追热点 Agent」「继续做今天那条」时使用。要环境变量 TIKHUB_API_KEY、Node 22+、Chrome。
 ---
 
 # 追热点 Agent
