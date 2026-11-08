@@ -154,12 +154,11 @@ function vBars(v, t, d) {
     const w = (PORT ? 58 : 74) * (nums[i] / max) * k;
     const p = parseNum(x.value);
     const lab = String(x.value);
-    const pulse = isHl && t > t0 + 1 ? (1 + .03 * Math.sin((t - t0) * 6)).toFixed(4) : 1;
     return `<div class="row" style="height:${px(rowH)};gap:${px(26)};${pop(t, t0, .3, 0)}">
       <div class="${isHl ? 'b' : 'w8'} nw" style="width:${px(nameBox)};text-align:right;font-size:${px(nfs)};${isHl ? 'color:var(--green2)' : ''}">${esc(x.name)}</div>
       <div style="flex:1;height:${px(rowH * .56)};position:relative">
         <div class="abs" style="left:0;top:0;bottom:0;width:${Math.max(w, .4)}%;border-radius:${px(12)};background:${col};${STRIPE()}${isHl ? `box-shadow:0 0 0 ${px(6)} rgba(47,179,95,.22);` : ''}"></div>
-        <div class="abs b nw" style="left:calc(${Math.max(w, .4)}% + ${px(22)});top:0;bottom:0;display:flex;align-items:center;font-size:${px(nfs * 1.05)};opacity:${ease((t - t0 - .5) / .35).toFixed(3)};${isHl ? `color:var(--green2);transform:scale(${pulse});transform-origin:left center;` : ''}">${esc(lab)}${esc(x.unit || '')}</div></div></div>`;
+        <div class="abs b nw" style="left:calc(${Math.max(w, .4)}% + ${px(22)});top:0;bottom:0;display:flex;align-items:center;font-size:${px(nfs * 1.05)};opacity:${ease((t - t0 - .5) / .35).toFixed(3)};${isHl ? 'color:var(--green2);' : ''}">${esc(lab)}${esc(x.unit || '')}</div></div></div>`;
   }).join('');
   const title = v.title ? `<div class="b" style="font-size:${px(fitSize(v.title, PORT ? 72 : 76, AREA.w * .9))};${pop(t, 0)}">${esc(v.title)}</div>` : '';
   return `<div class="col" style="gap:${px(30)};${PORT ? 'justify-content:center' : 'height:100%'}">${title}
@@ -230,8 +229,9 @@ function vVote(v, t, d) {
   const cw = PORT ? (n <= 2 ? 420 : 420) : Math.min(380, (AREA.w - (n - 1) * 34) / n);
   const chips = opts.map((o, i) => {
     const t0 = .35 + i * .12;
-    const s = t > t0 + .4 ? (1 + .02 * Math.sin((t - t0) * 5 + i * 1.6)).toFixed(4) : 1;
-    return `<div style="${pop(t, t0, .3, 30)}"><div class="pc col" style="width:${px(cw)};height:${px(PORT ? 190 : 200)};align-items:center;justify-content:center;border-radius:${px(30)};transform:scale(${s})">
+    // 都出来以后，绿框一个一个轮流走过去（不缩放）
+    const go = .35 + n * .12 + .5, on = t > go && Math.floor((t - go) / .55) % n === i;
+    return `<div style="${pop(t, t0, .3, 30)}"><div class="pc col" style="width:${px(cw)};height:${px(PORT ? 190 : 200)};align-items:center;justify-content:center;border-radius:${px(30)};${on ? `border-color:var(--green);border-width:${px(6)};` : ''}">
       <div class="b nw" style="font-size:${px(fitSize(o, 90, cw - 40))}">${esc(o)}</div></div></div>`;
   }).join('');
   const grid = PORT && n > 2
@@ -254,8 +254,11 @@ window.render = (t) => {
   const draw = DRAW[v.type] || vTitle;
   const drift = (t * 6 * K).toFixed(1);
   S.style.backgroundPosition = `${drift}px ${drift}px`;
-  const zoom = (1 + .035 * easeIO(lt / sc.dur)).toFixed(4);   // 每屏慢慢推近一点，画面不会完全停住
-  const page = `<div class="page" style="left:${px(AREA.l)};right:${px(AREA.r)};top:${px(AREA.t)};bottom:${px(AREA.b)};transform:scale(${zoom});transform-origin:50% 45%">${draw(v, lt, sc.dur)}</div>`;
+  // 不缩放、不推近（用户反复说过）。换屏用横向擦除：新的一屏从左往右露出来，擦除的前沿是一道绿线
+  const first = sc === SP.scenes[0], w = first ? 1 : ease((lt - .1) / .32);
+  const clip = w < 1 ? `clip-path:inset(0 ${((1 - w) * 100).toFixed(2)}% 0 0);` : '';
+  const page = `<div class="page" style="left:${px(AREA.l)};right:${px(AREA.r)};top:${px(AREA.t)};bottom:${px(AREA.b)};${clip}">${draw(v, lt, sc.dur)}</div>`
+    + (w < 1 ? `<div style="position:absolute;left:${px(AREA.l + w * AREA.w - 4)};top:${px(AREA.t)};bottom:${px(AREA.b)};width:${px(8)};border-radius:${px(4)};background:var(--green);opacity:${(1 - w).toFixed(3)}"></div>` : '');
   const kick = v.kicker ? `<div id="kicker" style="${PORT ? `left:${px(70)};top:${px(140)};font-size:${px(50)}` : `left:${px(90)};top:${px(30)};font-size:${px(46)}`};${fade(lt, 0, .25)}">${esc(v.kicker)}</div>` : '';
   const corner = SP.corner ? `<div id="corner" style="top:${px(PORT ? 70 : 30)};padding:${px(8)} ${px(26)};font-size:${px(PORT ? 34 : 30)};letter-spacing:${px(2)}">${esc(SP.corner)}</div>` : '';
   let cap = '';
