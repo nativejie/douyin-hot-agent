@@ -262,12 +262,13 @@ window.render = (t) => {
   const kick = v.kicker ? `<div id="kicker" style="${PORT ? `left:${px(70)};top:${px(140)};font-size:${px(50)}` : `left:${px(90)};top:${px(30)};font-size:${px(46)}`};${fade(lt, 0, .25)}">${esc(v.kicker)}</div>` : '';
   const corner = SP.corner ? `<div id="corner" style="top:${px(PORT ? 70 : 30)};padding:${px(8)} ${px(26)};font-size:${px(PORT ? 34 : 30)};letter-spacing:${px(2)}">${esc(SP.corner)}</div>` : '';
   let cap = '';
-  if (sc.caption) {
+  const CAPT = window.capAt ? window.capAt(sc, t) : sc.caption;
+  if (CAPT) {
     const av = SP.avatar ? `<span class="av" style="width:${px(PORT ? 96 : 92)};height:${px(PORT ? 96 : 92)}"><img src="${esc(SP.avatar)}"></span>` : '';
-    const fs = fitSize(sc.caption, PORT ? 60 : 66, (PORT ? 760 : 1500) - (SP.avatar ? 120 : 0));
+    const fs = fitSize(CAPT, PORT ? 60 : 66, (PORT ? 760 : 1500) - (SP.avatar ? 120 : 0));
     const k = ease(lt / .25);
     const pos = PORT ? `left:${px(70 + 880 / 2)};bottom:${px(450)};transform:translateX(-50%) translateY(${((1 - k) * 24 * K).toFixed(1)}px)` : `left:${px(60)};bottom:${px(48)};transform:translateY(${((1 - k) * 24 * K).toFixed(1)}px)`;
-    cap = `<div id="cap" style="${pos};opacity:${k.toFixed(3)};gap:${px(24)};padding:${px(10)} ${px(48)} ${px(10)} ${px(SP.avatar ? 10 : 48)};font-size:${px(fs)};min-height:${px(PORT ? 116 : 112)}">${av}<span>${esc(sc.caption)}</span></div>`;
+    cap = `<div id="cap" style="${pos};opacity:${k.toFixed(3)};gap:${px(24)};padding:${px(10)} ${px(48)} ${px(10)} ${px(SP.avatar ? 10 : 48)};font-size:${px(fs)};min-height:${px(PORT ? 116 : 112)}">${av}<span>${esc(CAPT)}</span></div>`;
   }
   S.innerHTML = page + kick + corner + cap;
   return true;

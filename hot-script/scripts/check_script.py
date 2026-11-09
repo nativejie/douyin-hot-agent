@@ -98,7 +98,7 @@ def main():
         if voice == "none" and sec > 4:
             warns.append(f"{sid}：不配旁白的一屏停 {sec} 秒，超过 4 秒")
         if voice == "tts" and nar and sec < len(re.sub(r'\s', '', nar)) / 5.5:
-            warns.append(f"{sid}：{len(nar)} 字的旁白只给了 {sec} 秒，念不完（每秒约 5 字）")
+            warns.append(f"{sid}：{len(nar)} 字的旁白只给了 {sec} 秒，念不完（每秒约 5 字；出画面时会按配音实际长度重算，这里只是估算偏短）")
         # 数字出处：这一屏出现的每个数，都要在它引用的 fact 的 text/value 里
         ref = s.get("facts") or []
         missing = [r for r in ref if r not in facts]

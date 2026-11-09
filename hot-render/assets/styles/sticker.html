@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>hot-render · sticker</title>
+<script src="spec.js"></script>
+<style>
+  /* sticker：绘本贴纸风。白页上一个深色细边圆角画框，框里是米色纸 + 纸纹；数据用铅笔线一笔笔画出来，
+     重点用水彩荧光笔刷出来；画框右边（竖屏是下面）站着一个铅笔水彩小机器人，按画面类型拿不同的工具、跟着画面蹦。
+     动效只有位移、旋转、透明度、裁切、描边；任何时候都不缩放、不推近。 */
+  :root {
+    --page: #fbfaf7; --frame: #3a3935; --paper: #faf6ee;
+    --ink: #3d3933; --pencil: #5d574d; --soft: #8b8378;
+    --sage: #8fa886; --sage-wash: rgba(143,168,134,.42); --apri-wash: rgba(232,180,122,.42);
+    --note-yellow: #f3e6b3; --note-sage: #dfe7d4; --note-apri: #f6dcc0;
+    --font: "Alibaba PuHuiTi 3.0", "Alibaba PuHuiTi", "PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { overflow: hidden; background: var(--page); }
+  body { font-family: var(--font); font-weight: 700; color: var(--ink); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  .abs { position: absolute; }
+  .layer { position: absolute; inset: 0; overflow: hidden; background: var(--paper); }   /* 实底：换屏时盖住上一页 */
+  .box { position: absolute; display: flex; flex-direction: column; justify-content: center; }
+  .nw { white-space: nowrap; }
+  .row { display: flex; align-items: center; }
+  .col { display: flex; flex-direction: column; }
+  .ch { display: inline-block; }
+  /* 水彩荧光笔：--w 从 0% 到 100% 刷出来；z-index:-1 要配 isolation，不然沉到纸下面 */
+  .hl { position: relative; display: inline-block; isolation: isolate; }
+  .hl::before { content: ""; position: absolute; left: -.12em; right: -.12em; bottom: .06em; height: 46%; z-index: -1;
+                background: var(--wash, var(--sage-wash)); border-radius: 40% 55% 45% 60% / 60% 40% 55% 45%; filter: url(#wash);
+                clip-path: inset(0 calc(100% - var(--w, 100%)) 0 0); }
+  svg.ln { position: absolute; overflow: visible; pointer-events: none; }
+  img.st { position: absolute; display: block; }
+  .grain { position: absolute; inset: 0; pointer-events: none; opacity: .5; mix-blend-mode: multiply;
+           background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' seed='7'/><feColorMatrix values='0 0 0 0 .55  0 0 0 0 .5  0 0 0 0 .42  0 0 0 .09 0'/></filter><rect width='300' height='300' filter='url(%23n)'/></svg>"); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <!-- 铅笔线轻微抖动、水彩边缘晕开 -->
+  <filter id="pencil"><feTurbulence type="fractalNoise" baseFrequency=".035" numOctaves="2" seed="4"/><feDisplacementMap in="SourceGraphic" scale="3.5"/></filter>
+  <filter id="wash"><feTurbulence type="fractalNoise" baseFrequency=".02" numOctaves="3" seed="9"/><feDisplacementMap in="SourceGraphic" scale="14"/><feGaussianBlur stdDeviation="1.2"/></filter>
+</svg>
+<div id="stage"></div>
+<script src="core.js"></script>
+<script>
+const { SP, PORT, K, px, clamp, ease, expo, easeIO, esc, parseNum, tw, fitSize, rollNum, sceneAt } = window.HR;
+const S = document.getElementById('stage');
+const INK = '#3d3933', PENCIL = '#5d574d', SOFT = '#8b8378', SAGE = '#8fa886';
+const WASH = { sage: 'rgba(143,168,134,.42)', apri: 'rgba(232,180,122,.42)' };
+const NOTE = ['#f3e6b3', '#dfe7d4', '#f6dcc0', '#e9e1d2'];
+
+// 版面（设计坐标）：画框、框里的内容区和机器人区（相对画框）、字幕
+const G = PORT
+  ? { frame: { x: 40, y: 200, w: 1000, h: 1170 }, content: { x: 50, y: 60, w: 850, h: 830 }, prop: { x: 50, y: 890, w: 850, h: 270 },
+      cap: `left:${px(70)};top:${px(1392)}` }
+  : { frame: { x: 84, y: 112, w: 1752, h: 790 }, content: { x: 96, y: 70, w: 1180, h: 650 }, prop: { x: 1330, y: 60, w: 380, h: 690 },
+      cap: `left:50%;top:${px(934)};transform:translateX(-50%)` };
+const CW = G.content.w;
+const BOT = PORT ? 260 : 400;          // 机器人高度
+
+// ---------- 小工具 ----------
+const back = (x) => { x = clamp(x); const c = 1.70158; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
+const tf = (dx, dy, r = 0) => `transform:translate(${(dx * K).toFixed(1)}px,${(dy * K).toFixed(1)}px) rotate(${r.toFixed(2)}deg);`;
+const fade = (t, t0, dur = .25, dy = 18) => { const k = ease((t - t0) / dur); return `opacity:${k.toFixed(3)};${tf(0, (1 - k) * dy)}`; };
+const fly = (t, t0, dx, dy, r = 0, dur = .4) => { const k = back((t - t0) / dur); if (t < t0) return 'opacity:0;';
+  return `opacity:${clamp((t - t0) / .12).toFixed(3)};${tf((1 - k) * dx, (1 - k) * dy, r * clamp(k))}`; };
+const wipe = (t, t0, dur = .45) => `--w:${(100 * ease((t - t0) / dur)).toFixed(1)}%;`;
+const hl = (text, t, t0, kind = 'sage', dur = .45) => `<span class="hl" style="--wash:${WASH[kind]};${wipe(t, t0, dur)}">${esc(text)}</span>`;
+// 逐字落下（标题用）
+const perChar = (text, t, t0, step = .045) => [...String(text)].map((c, i) => `<span class="ch" style="${fade(t, t0 + i * step, .2, 22)}">${c === ' ' ? '&nbsp;' : esc(c)}</span>`).join('');
+// 铅笔线：路径 pathLength=1，按进度画出来
+const draw = (t, t0, dur) => { const k = ease((t - t0) / dur); return `stroke-dasharray:1;stroke-dashoffset:${(1 - k).toFixed(4)};${k <= 0 ? 'opacity:0;' : ''}`; };
+const pen = (d, w, h, st, pos, sw = 3.4, color = PENCIL) => `<svg class="ln" width="${px(w)}" height="${px(h)}" viewBox="0 0 ${w} ${h}" style="${pos}"><path d="${d}" pathLength="1" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" filter="url(#pencil)" style="${st}"/></svg>`;
+// 有点抖的手画横线 / 方框 / 圈
+const wavy = (w, amp = 5, seed = 1) => { let d = `M2 ${amp}`; for (let x = 24; x <= w; x += 24) d += ` L${x} ${(amp + Math.sin(x * .05 + seed) * amp * .5 + Math.sin(x * .013 + seed * 2) * amp * .7).toFixed(1)}`; return d; };
+const rect = (w, h, j = 3, seed = 1) => { const s = (k) => (Math.sin(seed * 7.1 + k * 3.3) * j).toFixed(1);
+  return `M${4 + +s(1)} ${4 + +s(2)} C${w * .35} ${3 + +s(3)} ${w * .7} ${5 + +s(4)} ${w - 4} ${4 + +s(5)} L${w - 3 + +s(6)} ${h - 4} C${w * .65} ${h - 3 + +s(7)} ${w * .3} ${h - 5 + +s(8)} ${5} ${h - 4 + +s(9)} Z`; };
+const ring = (w, h, seed = 1) => { const p = []; for (let i = 0; i <= 44; i++) { const a = -2.3 + i / 44 * Math.PI * 2.12, r = 1 + Math.sin(a * 3 + seed) * .04;
+  p.push(`${(w / 2 + Math.cos(a) * (w / 2 - 6) * r).toFixed(1)} ${(h / 2 + Math.sin(a) * (h / 2 - 6) * r).toFixed(1)}`); } return 'M' + p.join(' L'); };
+// 便利贴（底色 + 铅笔描边，角度 r）
+const note = (inner, w, h, color, r, st) => `<div style="position:relative;flex:none;width:${px(w)};height:${px(h)};${st}">
+    <div class="abs" style="inset:0;background:${color};box-shadow:0 ${px(5)} ${px(12)} rgba(80,70,50,.13);rotate:${r}deg"></div>
+    ${pen(rect(w, h, 2.5, r + 3), w, h, '', `left:0;top:0;rotate:${r}deg`, 2.4, 'rgba(93,87,77,.6)')}
+    <div class="abs col" style="inset:0;align-items:center;justify-content:center;text-align:center;rotate:${r}deg">${inner}</div></div>`;
+
+// ---------- 七种画面（坐标都在内容区里） ----------
+function vTitle(v, t, d) {
+  const text = String(v.text || '');
+  const vs = text.match(/^(.+?)\s+(vs|VS|对|vs\.)\s+(.+)$/);
+  let main, uw, fs;
+  if (vs) {
+    fs = fitSize(vs[1] + vs[3] + '　　', PORT ? 170 : 190, CW * .92);
+    const rs = fs * .9;
+    main = `<div class="row nw" style="gap:${px(30)}">
+      <span style="font-size:${px(fs)};${fly(t, 0, -260, -40, -2)}">${esc(vs[1])}</span>
+      <span style="position:relative;width:${px(rs)};height:${px(rs)};${fade(t, .2, .2)}">
+        <span class="abs" style="inset:0;display:flex;align-items:center;justify-content:center;font-size:${px(fs * .42)};color:${SOFT}">vs</span>
+        ${pen(ring(rs, rs, 2), rs, rs, draw(t, .3, .45), 'left:0;top:0')}</span>
+      <span style="font-size:${px(fs)};${fly(t, .08, 260, -40, 2)}">${esc(vs[3])}</span></div>`;
+    uw = 0;
+  } else {
+    fs = fitSize(text, PORT ? 150 : 170, CW * .95);
+    uw = Math.min(CW, tw(text) * fs);
+    main = `<div style="position:relative;font-size:${px(fs)};line-height:1.15" class="nw">${perChar(text, t, 0)}
+      ${pen(wavy(uw, 6, 3), uw, 16, draw(t, .45, .45), `left:0;top:100%;margin-top:${px(4)}`, 4)}</div>`;
+  }
+  const sub = v.sub ? `<div style="margin-top:${px(56)};font-size:${px(fitSize(v.sub, PORT ? 58 : 60, CW * .9))};color:${INK};line-height:1.3;${fade(t, .45, .3)}">${hl(v.sub, t, .7, 'apri', .55)}</div>` : '';
+  return `<div class="col">${main}${sub}</div>`;
+}
+
+function vNumber(v, t, d) {
+  const p = parseNum(v.value), f = v.from != null ? parseNum(v.from) : null;
+  const shown = rollNum(v.value, f ? v.from : 0, t, .3, 1.1);
+  const label = String(v.label || '');
+  const isPct = p && p.suf.trim() === '%' && p.n >= 0 && p.n <= 100;
+  const cur = p ? parseFloat(shown.replace(/[^\d.\-]/g, '')) : 0;
+  const vfs = fitSize(String(v.value), PORT ? 250 : 280, CW * .9, .62 / .58);
+  const vw = tw(String(v.value)) * vfs * .62 / .58;
+  const lab = `<div style="font-size:${px(fitSize(label, PORT ? 62 : 64, CW * .95))};color:${INK};${fade(t, 0, .3)}">${esc(label)}</div>`;
+  let old = '';
+  if (f) {
+    const ofs = PORT ? 96 : 110, ow = tw(String(v.from)) * ofs * .62 / .58;
+    old = `<div class="row nw" style="gap:${px(26)};margin-top:${px(18)};${fade(t, .1, .25)}">
+      <span style="position:relative;font-size:${px(ofs)};color:${SOFT}">${esc(v.from)}
+        ${pen(`M0 ${ofs * .3} C${ow * .4} ${ofs * .2} ${ow * .7} ${ofs * .36} ${ow} ${ofs * .26}`, ow, ofs * .5, draw(t, .3, .3), `left:0;top:${px(ofs * .32)}`, 5, PENCIL)}</span>
+      ${pen('M4 30 C60 26 110 32 150 30 M120 8 L152 30 L120 52', 160, 60, draw(t, .5, .35), 'position:relative', 4.5)}</div>`;
+  }
+  // 数：隔一个数字屏换一种强调——荧光笔刷在数底下 / 铅笔圈把数圈起来
+  const big = v._alt && !f
+    ? `<div style="position:relative;align-self:flex-start;font-size:${px(vfs)};line-height:1.1;padding:0 ${px(30)}">${esc(shown)}
+        ${pen(ring(vw + 120, vfs * 1.25, 5), vw + 120, vfs * 1.25, draw(t, 1.3, .5), `left:${px(-30)};top:${px(-vfs * .08)}`, 4.5, SAGE)}</div>`
+    : `<div style="font-size:${px(vfs)};line-height:1.1"><span class="hl" style="--wash:${WASH.apri};${wipe(t, 1.35, .45)}">${esc(shown)}</span></div>`;
+  const bw = CW * (PORT ? 1 : .86), bh = 46;
+  const bar = isPct ? `<div style="position:relative;width:${px(bw)};height:${px(bh)};margin-top:${px(30)};${fade(t, .15, .25)}">
+      <div class="abs" style="left:${px(6)};top:${px(6)};bottom:${px(6)};width:calc(${clamp(cur / 100) * 100}% - ${px(12)});background:${WASH.sage};filter:url(#wash)"></div>
+      ${pen(rect(bw, bh, 2.5, 4), bw, bh, draw(t, .15, .5), 'left:0;top:0', 3)}</div>` : '';
+  return `<div class="col">${lab}${old}${big}${bar}</div>`;
+}
+
+function vBars(v, t, d) {
+  const items = (v.items || []).slice(0, 6), n = items.length;
+  const nums = items.map((x) => parseFloat(x.value) || 0), max = Math.max(...nums, 1e-9);
+  const hlName = v.highlight != null ? String(v.highlight) : null;
+  const rowH = PORT ? (n <= 4 ? 140 : 112) : (n <= 4 ? 108 : 86);
+  const nameW = Math.max(...items.map((x) => tw(x.name)), 2), nameMax = PORT ? 280 : 360;
+  const nfs = Math.min(PORT ? 58 : 56, (nameMax - 10) / nameW);
+  const trackW = CW - nameW * nfs - 40 - (PORT ? 190 : 220);
+  const rows = items.map((x, i) => {
+    const t0 = .3 + i * .12, on = hlName ? String(x.name) === hlName : nums[i] === max;
+    const w = Math.max(trackW * nums[i] / max, 12), bh = rowH * .5;
+    return `<div class="row" style="height:${px(rowH)};gap:${px(24)};${fade(t, t0 - .15, .25, 0)}">
+      <div class="nw" style="width:${px(nameW * nfs + 16)};font-size:${px(nfs)};text-align:right">${on ? hl(x.name, t, t0 + .7, 'apri', .35) : esc(x.name)}</div>
+      <div style="position:relative;width:${px(trackW)};height:${px(bh)}">
+        <div class="abs" style="left:${px(4)};top:${px(4)};width:${px(w - 8)};bottom:${px(4)};background:${on ? WASH.apri : WASH.sage};filter:url(#wash);clip-path:inset(0 ${(100 * (1 - easeIO((t - t0) / .55))).toFixed(1)}% 0 0)"></div>
+        ${pen(rect(w, bh, 2, i + 1), w, bh, draw(t, t0, .55), 'left:0;top:0', 2.8)}
+        <div class="abs nw row" style="left:${px(w + 22)};top:${px(-20)};bottom:${px(-20)};font-size:${px(nfs * 1.05)};color:${on ? INK : PENCIL};${fade(t, t0 + .6, .2, 0)}">${esc(String(x.value))}${esc(x.unit || '')}</div></div></div>`;
+  }).join('');
+  const axisH = rowH * n;
+  const axis = pen(`M4 0 C6 ${axisH * .4} 2 ${axisH * .7} 5 ${axisH}`, 10, axisH, draw(t, .1, .35), `left:${px(nameW * nfs + 16 + 12)};top:0`, 3);
+  const title = v.title ? `<div class="nw" style="font-size:${px(fitSize(v.title, PORT ? 82 : 88, CW * .95))};margin-bottom:${px(30)}">${perChar(v.title, t, 0, .03)}</div>` : '';
+  return `<div class="col">${title}<div style="position:relative">${axis}${rows}</div></div>`;
+}
+
+function vCompare(v, t, d) {
+  const L = v.left || {}, R = v.right || {}, pl = parseNum(L.value), pr = parseNum(R.value);
+  const num = pl && pr && pl.suf === pr.suf;
+  const winL = num && pl.n > pr.n, winR = num && pr.n > pl.n;
+  const cw = PORT ? CW : (CW - 150) / 2, ch = PORT ? 310 : 400;
+  const card = (o, win, dx, t0, color, r) => {
+    const nfs = fitSize(o.name, PORT ? 70 : 92, cw - 60), vfs = fitSize(String(o.value ?? ''), PORT ? 112 : 170, cw - 60, .62 / .58);
+    const val = rollNum(o.value, 0, t, .4, 1.0);
+    const inner = `<div class="nw" style="font-size:${px(nfs)}">${esc(o.name)}</div>
+      <div class="nw" style="font-size:${px(vfs)};line-height:1.1;margin-top:${px(8)}">${win ? `<span class="hl" style="--wash:${WASH.apri};${wipe(t, 1.45, .4)}">${esc(val)}</span>` : esc(val)}</div>
+      ${o.note ? `<div class="nw" style="font-size:${px(PORT ? 38 : 42)};color:${SOFT};margin-top:${px(PORT ? 4 : 10)}">${esc(o.note)}</div>` : ''}`;
+    return note(inner, cw, ch, color, r, fly(t, t0, dx, 0, 0, .45));
+  };
+  const vsS = PORT ? 90 : 130;
+  const vs = `<div style="position:relative;flex:none;width:${px(vsS)};height:${px(vsS)};${PORT ? `margin:${px(6)} 0` : ''};${fade(t, .3, .2)}">
+      <span class="abs" style="inset:0;display:flex;align-items:center;justify-content:center;font-size:${px(vsS * .4)};color:${SOFT}">vs</span>
+      ${pen(ring(vsS, vsS, 3), vsS, vsS, draw(t, .35, .4), 'left:0;top:0')}</div>`;
+  let bar = '';
+  if (num && pl.n >= 0 && pr.n >= 0 && pl.n + pr.n > 0) {
+    const a = pl.n / (pl.n + pr.n), bw = CW, bh = 40, cut = bw * a;
+    bar = `<div style="position:relative;width:${px(bw)};height:${px(bh)};margin-top:${px(PORT ? 34 : 44)};${fade(t, .5, .2, 0)}">
+      <div class="abs" style="left:${px(5)};top:${px(5)};bottom:${px(5)};width:${px(cut - 8)};background:${winL ? WASH.apri : WASH.sage};filter:url(#wash);clip-path:inset(0 ${(100 * (1 - easeIO((t - .6) / .6))).toFixed(1)}% 0 0)"></div>
+      <div class="abs" style="right:${px(5)};top:${px(5)};bottom:${px(5)};width:${px(bw - cut - 8)};background:${winR ? WASH.apri : WASH.sage};filter:url(#wash);clip-path:inset(0 0 0 ${(100 * (1 - easeIO((t - .6) / .6))).toFixed(1)}%)"></div>
+      ${pen(rect(bw, bh, 2.5, 6) + ` M${cut} 2 L${cut + 2} ${bh - 2}`, bw, bh, draw(t, .5, .5), 'left:0;top:0', 2.8)}</div>`;
+  }
+  return `<div class="col"><div class="${PORT ? 'col' : 'row'}" style="align-items:center;gap:${px(PORT ? 0 : 10)}">
+    ${card(L, winL, -500, 0, NOTE[0], -1.5)}${vs}${card(R, winR, 500, .08, NOTE[1], 1.5)}</div>${bar}</div>`;
+}
+
+function vList(v, t, d) {
+  const items = (v.items || []).slice(0, 5);
+  const gap = clamp((d - 1.0) / Math.max(items.length, 1), .2, .6);
+  const bs = PORT ? 64 : 58;
+  const rows = items.map((x, i) => {
+    const t0 = .3 + i * gap;
+    return `<div class="row" style="gap:${px(30)};min-height:${px(PORT ? 128 : 104)};${fade(t, t0 - .05, .25, 0)}">
+      <div style="position:relative;flex:none;width:${px(bs)};height:${px(bs)}">
+        ${pen(rect(bs, bs, 2, i + 2), bs, bs, draw(t, t0, .3), 'left:0;top:0', 3)}
+        ${pen(`M${bs * .18} ${bs * .5} L${bs * .42} ${bs * .78} L${bs * 1.05} ${bs * .02}`, bs, bs, draw(t, t0 + .3, .25), 'left:0;top:0', 5, SAGE)}</div>
+      <div style="font-size:${px(fitSize(x, PORT ? 68 : 72, CW - 120))};line-height:1.2;${fly(t, t0 + .05, 80, 0, 0, .35)}">${esc(x)}</div></div>`;
+  }).join('');
+  const title = v.title ? `<div class="nw" style="font-size:${px(fitSize(v.title, PORT ? 86 : 92, CW * .95))};margin-bottom:${px(26)}">${perChar(v.title, t, 0, .03)}</div>` : '';
+  return `<div class="col">${title}${rows}</div>`;
+}
+
+function vQuote(v, t, d) {
+  const chars = [...String(v.text || '')], n = chars.length;
+  const dur = Math.min(1.3, d * .45), t0 = .45;
+  let fs = PORT ? (n <= 10 ? 110 : n <= 18 ? 90 : 70) : (n <= 12 ? 120 : n <= 20 ? 100 : 80);
+  const pad = 60, innerW = CW - pad * 2;
+  const one = innerW / (tw(v.text) * 1.08);            // 差一点就能一行放下的，缩到一行，免得折出一个孤字
+  if (one < fs && one >= fs * .72) fs = one;
+  const need = tw(v.text) * fs * 1.08;                  // 粗体比估算宽一点，留余量
+  const lines = Math.ceil(need / innerW), lineW = lines > 1 ? innerW : need;
+  const bw = lineW + pad * 2, bh = lines * fs * 1.3 + pad * 1.6;
+  const k = clamp((t - t0) / dur), m = Math.round(k * n);
+  const caret = k < 1 || Math.floor(t * 2.5) % 2 === 0 ? `<span style="display:inline-block;width:${px(5)};height:${px(fs * .85)};background:${PENCIL};margin-left:${px(6)};vertical-align:${px(-fs * .08)}"></span>` : '';
+  const bubble = rect(bw, bh, 3.5, 8) + ` M${bw * .16} ${bh - 2} L${bw * .12} ${bh + 56} L${bw * .28} ${bh - 3}`;
+  return `<div class="col" style="align-items:flex-start">
+    <div style="position:relative;width:${px(bw)};height:${px(bh)};${fade(t, 0, .2, 0)}">
+      <div class="abs" style="inset:${px(6)};background:#fffdf8"></div>
+      ${pen(bubble, bw, bh + 60, draw(t, 0, .5), 'left:0;top:0', 3.4)}
+      <div class="abs" style="left:${px(pad)};top:${px(pad * .8)};width:${px(lineW)};font-size:${px(fs)};line-height:1.3;${lines > 1 ? '' : 'white-space:nowrap;'}">${esc(chars.slice(0, m).join(''))}${caret}</div></div>
+    ${v.who ? `<div style="font-size:${px(PORT ? 40 : 42)};color:${SOFT};margin-top:${px(86)};margin-left:${px(bw * .3)};${fade(t, t0 + dur, .3)}">—— ${esc(v.who)}</div>` : ''}</div>`;
+}
+
+function vVote(v, t, d) {
+  const opts = (v.options || []).slice(0, 4), n = opts.length;
+  const cw = PORT ? 400 : Math.min(360, (CW - (n - 1) * 40) / n), ch = PORT ? 200 : 210;
+  const go = .5 + n * .1 + .45;
+  const lit = t > go ? Math.floor((t - go) / .5) % n : -1;     // 都贴上以后轮流圈一个
+  const chips = opts.map((o, i) => {
+    const on = i === lit, lift = on ? -14 : 0;
+    const inner = `<span class="nw" style="font-size:${px(fitSize(o, 84, cw - 50))}">${esc(o)}</span>`;
+    return `<div style="position:relative;${tf(0, lift)}">${note(inner, cw, ch, NOTE[i % 4], [-2, 1.5, -1, 2][i % 4], fly(t, .45 + i * .1, 0, -380, 0, .4))}
+      ${on ? pen(ring(cw + 50, ch + 50, i + 1), cw + 50, ch + 50, draw(t, go + (t - go) - ((t - go) % .5), .3), `left:${px(-25)};top:${px(-25)}`, 4.5, SAGE) : ''}</div>`;
+  }).join('');
+  const grid = PORT && n > 2 ? `<div style="display:grid;grid-template-columns:repeat(2,${px(cw)});gap:${px(40)}">${chips}</div>` : `<div class="row" style="gap:${px(40)}">${chips}</div>`;
+  return `<div class="col" style="gap:${px(70)}">
+    <div class="nw" style="font-size:${px(fitSize(v.question, PORT ? 130 : 150, CW * .95))}">${perChar(v.question, t, 0, .06)}</div>${grid}</div>`;
+}
+
+const DRAW = { title: vTitle, number: vNumber, bars: vBars, compare: vCompare, list: vList, quote: vQuote, vote: vVote };
+{ let n = 0; for (const x of SP.scenes) if ((x.visual || {}).type === 'number') x.visual._alt = n++ % 2 === 1; }
+
+// ---------- 小机器人：每种画面拿一样工具（贴纸在 stickers/，透明底） ----------
+// 放大镜看数、铅笔画条、天平比两边、剪刀剪清单、相框框原话、指挥棒点名、画笔写标题
+const TOOL = { number: 'bot1', compare: 'bot2', list: 'bot3', bars: 'bot4', title: 'bot5', quote: 'bot6', vote: 'bot7' };
+const BEATS = (v, d) => {                  // 机器人在这些时刻蹦一下（跟着画面里的事）
+  switch (v.type) {
+    case 'bars': return (v.items || []).slice(0, 6).map((_, i) => .3 + i * .12 + .55);
+    case 'list': { const n = Math.min((v.items || []).length, 5), g = clamp((d - 1) / Math.max(n, 1), .2, .6); return [...Array(n)].map((_, i) => .6 + i * g); }
+    case 'number': return [1.4];
+    case 'title': return [.9];
+    case 'quote': return [.4];
+    case 'vote': { const n = Math.min((v.options || []).length, 4), go = .5 + n * .1 + .45; const r = []; for (let x = go; x < d; x += .5) r.push(x); return r; }
+    default: return [1.4];
+  }
+};
+function robot(i, lt, d) {
+  const sc = SP.scenes[i], v = sc.visual || {};
+  const src = `stickers/${TOOL[v.type] || 'bot5'}.png`;
+  // 进场：从画框外跳进来（横屏从右、竖屏从下），落地带一点回弹
+  const dir = i % 2 ? 1 : -1;
+  const q = clamp(lt / .5), k = back(q);
+  let dx = PORT ? (1 - k) * 300 * dir : (1 - k) * 520, dy = PORT ? (1 - k) * 260 - Math.sin(Math.PI * q) * 60 : -Math.sin(Math.PI * q) * 120;
+  let r = (1 - q) * 12 * (PORT ? dir : 1);
+  for (const b of BEATS(v, d)) { const h = (lt - b) / .32; if (h > 0 && h < 1) dy -= Math.sin(Math.PI * h) * (PORT ? 22 : 34); }
+  dy += Math.sin(lt * 2.2 + i) * (PORT ? 3 : 5);                 // 待机轻轻晃
+  r += Math.sin(lt * 1.4 + i * 2) * 2;
+  if (v.type === 'compare') {                                    // 天平：数滚完以后往大的那边歪
+    const pl = parseNum((v.left || {}).value), pr = parseNum((v.right || {}).value);
+    if (pl && pr && pl.n !== pr.n) r += (pl.n > pr.n ? -7 : 7) * ease((lt - 1.4) / .4);
+  }
+  const P = G.prop, h = BOT, w = h * 300 / 420;
+  const left = PORT ? P.x + P.w - w - 20 : P.x + (P.w - w) / 2, top = PORT ? P.y + P.h - h : P.y + P.h - h - 40;
+  const shadow = `<div class="abs" style="left:${px(left + w * .18)};top:${px(top + h - 14)};width:${px(w * .64)};height:${px(PORT ? 16 : 26)};border-radius:50%;background:rgba(93,87,77,.12);filter:blur(${px(4)});opacity:${clamp(q * 1.5)}"></div>`;
+  return shadow + `<img class="st" src="${src}" style="left:${px(left)};top:${px(top)};height:${px(h)};transform-origin:50% 90%;opacity:${clamp(q * 4)};${tf(dx, dy, r)}">`;
+}
+
+// 一页纸（画框里面）：内容 + 机器人
+function scenePage(i, lt) {
+  const sc = SP.scenes[i], v = sc.visual || {};
+  const draw = DRAW[v.type] || vTitle, C = G.content;
+  return `<div class="layer">
+    <div class="box" style="left:${px(C.x)};top:${px(C.y)};width:${px(C.w)};height:${px(C.h)}">${draw(v, lt, sc.dur)}</div>${robot(i, lt, sc.dur)}</div>`;
+}
+
+window.render = (t) => {
+  const { i, sc, lt } = sceneAt(t);
+  const F = G.frame;
+  // 换屏：新的一页从左往右擦过来，擦的那条边是一道铅笔线
+  let pages;
+  const TR = .4;
+  if (i > 0 && lt < TR) {
+    const prev = SP.scenes[i - 1], k = easeIO(lt / TR);
+    pages = scenePage(i - 1, prev.dur + lt)
+      + `<div class="layer" style="clip-path:inset(0 ${(100 * (1 - k)).toFixed(2)}% 0 0)">${scenePage(i, lt)}</div>`
+      + pen(`M4 0 C8 ${F.h * .3} 0 ${F.h * .6} 5 ${F.h}`, 12, F.h, '', `left:calc(${(100 * k).toFixed(2)}% - ${px(6)});top:0`, 3.4);
+  } else pages = scenePage(i, lt);
+  const frame = `<div class="abs" style="left:${px(F.x)};top:${px(F.y)};width:${px(F.w)};height:${px(F.h)};border-radius:${px(34)};border:${px(3)} solid #3a3935;overflow:hidden;background:var(--paper)">${pages}<div class="grain"></div></div>`;
+  const v = sc.visual || {};
+  const kick = v.kicker ? `<div class="abs nw" style="${PORT ? `left:${px(44)};top:${px(124)}` : `left:${px(88)};top:${px(46)}`};font-size:${px(PORT ? 40 : 34)};color:${INK};letter-spacing:${px(2)};${fade(lt, 0, .3, 10)}">
+      <span style="display:inline-block;width:${px(16)};height:${px(16)};border-radius:50%;background:${SAGE};vertical-align:middle;margin-right:${px(14)}"></span>${esc(v.kicker)}</div>` : '';
+  const corner = SP.corner ? `<div class="abs nw" style="right:${px(PORT ? 150 : 88)};top:${px(PORT ? 70 : 44)};font-size:${px(PORT ? 30 : 28)};padding:${px(6)} ${px(18)};border:${px(2)} solid ${PENCIL};border-radius:${px(10)};color:${PENCIL}">${esc(SP.corner)}</div>` : '';
+  let cap = '';
+  const CAPT = window.capAt ? window.capAt(sc, t) : sc.caption;
+  if (CAPT) {
+    const av = SP.avatar ? `<span style="position:relative;flex:none;width:${px(62)};height:${px(62)};border-radius:50%;overflow:hidden;background:#f3efe6"><img src="${esc(SP.avatar)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 30%"></span>` : '';
+    const fs = fitSize(CAPT, PORT ? 50 : 44, PORT ? 760 : 1500);
+    cap = `<div class="abs row" style="${G.cap};gap:${px(16)};padding:${px(10)} ${px(30)} ${px(10)} ${px(SP.avatar ? 12 : 30)};border-radius:${px(14)};background:#1d1d1b">${av}<span class="nw" style="font-size:${px(fs)};color:#fff">${esc(CAPT)}</span></div>`;
+  }
+  S.innerHTML = frame + kick + corner + cap;
+  return true;
+};
+// 贴纸先加载好再截第一帧
+window.PRELOAD = Promise.all([window.PRELOAD, ...[...new Set(Object.values(TOOL))].map((b) => new Promise((r) => { const im = new Image(); im.onload = im.onerror = r; im.src = `stickers/${b}.png`; }))]);
+window.PRELOAD.then(() => window.render(0));
+</script>
+</body>
+</html>

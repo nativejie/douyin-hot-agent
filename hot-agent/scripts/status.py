@@ -105,6 +105,16 @@ def main():
     prof = dirp.parent / "profile.md"
     print(f"工作文件夹：{Path.cwd()}")
     print(f"账号档案：{'有' if prof.exists() else '没有（第 1 步会问）'}  {prof}")
+    ip = dirp.parent / "ip"
+    if ip.is_dir():
+        have = [n for n, ok in [("人设 ip.md", (ip / "ip.md").exists()), ("头像", (ip / "avatar.png").exists() or (ip / "avatar.jpg").exists()),
+                                ("角色贴纸 %d 张" % len(list((ip / "stickers").glob("bot*.png"))) if (ip / "stickers").is_dir() else "", (ip / "stickers").is_dir()),
+                                ("音色 voice.json", (ip / "voice.json").exists())] if ok]
+        print(f"IP：{'、'.join(have) or '文件夹是空的'}  {ip}")
+    else:
+        print("IP：没有（可选，见 hot-agent/references/ip.md）")
+    print(f"画 IP 用的 VIZLUMA_API_KEY：{'有' if os.environ.get('VIZLUMA_API_KEY') else '没有（可选，只有用 make_ip.py 画头像和角色贴纸时要；要先开通拿额度）'}")
+    print(f"配旁白用的 MINIMAX_API_KEY：{'有' if os.environ.get('MINIMAX_API_KEY') else '没有（只有配旁白时要；没有就在 MiniMax 网页上生成）'}")
     missing = [s for _, s, _, _ in STEPS if not (SKILLS / s / "SKILL.md").exists()]
     if missing:
         print(f"缺 skill：{', '.join(missing)}（要和 hot-agent 放在同一个 skills 文件夹里）")

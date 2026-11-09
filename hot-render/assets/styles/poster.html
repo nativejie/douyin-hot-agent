@@ -204,11 +204,12 @@ window.render = (t) => {
   const T = THEME(i);
   const corner = SP.corner ? `<div class="abs nw" style="right:${px(PORT ? 150 : 60)};top:${px(PORT ? 70 : 44)};font-size:${px(PORT ? 30 : 28)};padding:${px(6)} ${px(18)};outline:${px(3)} solid ${T.fg};outline-offset:${px(-3)};color:${T.fg}">${esc(SP.corner)}</div>` : '';
   let cap = '';
-  if (sc.caption) {
+  const CAPT = window.capAt ? window.capAt(sc, t) : sc.caption;
+  if (CAPT) {
     const av = SP.avatar ? `<span style="position:relative;flex:none;width:${px(96)};height:${px(96)};border-radius:50%;overflow:hidden;background:${PAPER};border:${px(4)} solid ${T.plate}"><img src="${esc(SP.avatar)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 30%"></span>` : '';
-    const fs = fitSize(sc.caption, PORT ? 56 : 52, (PORT ? 760 : 1400));
+    const fs = fitSize(CAPT, PORT ? 56 : 52, (PORT ? 760 : 1400));
     const pos = PORT ? `left:${px(70)};bottom:${px(470)}` : `left:${px(56)};bottom:${px(40)}`;
-    cap = `<div class="abs row" style="${pos};gap:${px(18)}">${av}<span class="nw" style="font-size:${px(fs)};padding:${px(10)} ${px(26)};background:${T.plate};color:${T.plateFg}">${esc(sc.caption)}</span></div>`;
+    cap = `<div class="abs row" style="${pos};gap:${px(18)}">${av}<span class="nw" style="font-size:${px(fs)};padding:${px(10)} ${px(26)};background:${T.plate};color:${T.plateFg}">${esc(CAPT)}</span></div>`;
   }
   S.innerHTML = html + GRAIN + corner + cap;
   return true;

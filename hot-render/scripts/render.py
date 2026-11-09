@@ -8,10 +8,11 @@
 选项：
   --dir 热点/今天日期        默认今天的文件夹
   --size 1920x1080           横屏（默认）；竖屏用 1080x1920
-  --style poster|chalk|paper  画面风格：poster 海报风（默认）、chalk 黑板粉笔、paper 纸面卡片
+  --style poster|chalk|paper|sticker  画面风格：poster 海报风（默认）、chalk 黑板粉笔、paper 纸面卡片、sticker 绘本贴纸
   --music beat|none|文件路径  beat = 自带合成的节奏（默认）；none = 只留转场音效（发布时在 App 里选热门音乐）；
                               也可以给一个 mp3 / wav（自己有版权的）
-  --avatar 图片路径           字幕胶囊左边的圆形头像（可选；默认用 热点/avatar.png，没有就不放）
+  --avatar 图片路径           字幕胶囊左边的圆形头像（可选；默认用 热点/ip/avatar.png，其次 热点/avatar.png，没有就不放）
+稿子是 voice: tts 时自动配旁白（MiniMax 语音合成，见 voice.py），每屏停多久按念多久算，字幕跟着念到的字走。
   --fps 30   --jobs 4         帧率、同时开几个 Chrome
   --only s3,s5                --check 时只出这几屏
 """
@@ -23,6 +24,7 @@ HERE = Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 sys.path.insert(0, str(HERE))
 import audio  # noqa: E402
+import voice  # noqa: E402
 
 try:
     sys.stdout.reconfigure(line_buffering=True)   # 被管道接走时也按顺序立刻打出来
@@ -32,7 +34,8 @@ except Exception:
 TYPES = {"title", "number", "bars", "compare", "list", "quote", "vote"}
 STYLES = {"poster": "海报风：热橙 / 墨黑大色块、超大斜体粗字、整块色板换屏",
           "chalk": "黑板粉笔：墨绿黑板、粉笔字一笔笔写出来、手画下划线和圈",
-          "paper": "纸面卡片：米色点阵底、白卡片、绿色强调"}
+          "paper": "纸面卡片：米色点阵底、白卡片、绿色强调",
+          "sticker": "绘本贴纸：米色纸画框、铅笔线画出来、水彩荧光笔、拿工具的小机器人跟着蹦"}
 
 
 def die(msg):
@@ -102,7 +105,7 @@ def find_ffmpeg():
 
 
 # ---------- 读稿子 ----------
-def load(dirp, size, avatar):
+def load(dirp, size, avatar, vo=None):
     sp = dirp / "script.json"
     if not sp.exists():
         die(f"找不到 {sp}。要在用户的工作文件夹里运行（里面有「热点」文件夹），或者用 --dir 指定。")
@@ -113,17 +116,23 @@ def load(dirp, size, avatar):
         if v.get("type") not in TYPES:
             die(f"{s.get('id')}：画面类型「{v.get('type')}」不认识，只认 {'/'.join(sorted(TYPES))}。先回 hot-script 改稿。")
         d = float(s.get("seconds") or 3)
-        if d * 2 != round(d * 2):
+        row = {"id": s.get("id"), "t0": round(t, 3), "dur": d, "visual": v, "caption": s.get("caption") or ""}
+        if vo and s.get("id") in vo:              # 配了旁白：这屏停多久按念多久算，字幕跟着念到的字走
+            x = vo[s.get("id")]
+            d = row["dur"] = voice.scene_seconds(x["dur"])
+            row["voice"] = x["file"]
+            row["subs"] = [{"a": round(voice.LEAD + c["a"], 3), "text": c["text"]} for c in x["subs"]]
+        elif d * 2 != round(d * 2):
             warns.append(f"{s.get('id')}：停 {d} 秒，不是 0.5 秒的整数倍，切换不在拍子上")
-        scenes.append({"id": s.get("id"), "t0": round(t, 3), "dur": d, "visual": v, "caption": s.get("caption") or ""})
+        scenes.append(row)
         t += d
     if not scenes:
         die("script.json 里没有 scenes")
     tgt = sc.get("target_seconds")
-    if tgt and abs(tgt - t) >= 1:
+    if tgt and abs(tgt - t) >= 1 and not vo:
         warns.append(f"script.json 的 target_seconds 是 {tgt}，实际各屏加起来 {round(t, 1)} 秒（以实际为准）")
     w, h = (int(x) for x in size.lower().split("x"))
-    spec = {"w": w, "h": h, "corner": sc.get("corner") or "", "avatar": None, "scenes": scenes, "total": round(t, 3)}
+    spec = {"w": w, "h": h, "corner": sc.get("corner") or "", "avatar": None, "scenes": scenes, "total": round(t, 3), "voiced": bool(vo)}
     return sc, spec, warns
 
 
@@ -133,13 +142,22 @@ def prepare(dirp, spec, avatar, style):
     shutil.copy(ASSETS / "styles" / f"{style}.html", rd / "page.html")
     shutil.copy(ASSETS / "styles" / "core.js", rd / "core.js")
     shutil.copytree(ASSETS / "fonts", rd / "fonts", dirs_exist_ok=True)
+    if style == "sticker":
+        shutil.copytree(ASSETS / "stickers", rd / "stickers", dirs_exist_ok=True)
+        own = dirp.parent / "ip" / "stickers"   # 用户自己的角色贴纸：同名文件盖掉自带的小机器人
+        if own.is_dir():
+            for f in own.glob("bot*.png"):
+                shutil.copy(f, rd / "stickers" / f.name)
     if avatar:
         ap = Path(avatar)
         if not ap.exists():
             die(f"头像文件不存在：{ap}")
         shutil.copy(ap, rd / ("avatar" + ap.suffix.lower()))
         spec["avatar"] = "avatar" + ap.suffix.lower()
-    (rd / "spec.js").write_text("window.SPEC = " + json.dumps(spec, ensure_ascii=False) + ";\n", encoding="utf-8")
+    # capAt：这一刻字幕条上显示什么。配了旁白就是正在念的那一句，没配就是这屏的 caption
+    cap_js = ("window.capAt = (sc, t) => { if (!sc.subs || !sc.subs.length) return sc.caption; const lt = t - sc.t0; "
+              "let c = sc.subs[0].text; for (const s of sc.subs) if (lt >= s.a) c = s.text; return c; };\n")
+    (rd / "spec.js").write_text("window.SPEC = " + json.dumps(spec, ensure_ascii=False) + ";\n" + cap_js, encoding="utf-8")
     return rd
 
 
@@ -223,6 +241,7 @@ def video(node, chrome, ffmpeg, rd, spec, fps, jobs):
 
 
 def make_audio(ffmpeg, rd, spec, music):
+    """音乐 + 转场音效（+ 旁白）。有旁白时音乐压到 0.3，旁白在每屏开头 voice.LEAD 秒开口。"""
     total = spec["total"]
     cuts = [s["t0"] for s in spec["scenes"]]
     sfx, kept = audio.sfx_track(total, cuts)
@@ -242,8 +261,19 @@ def make_audio(ffmpeg, rd, spec, music):
                             f"[0:a]atrim=0:{total},afade=t=out:st={fo}:d=1.5,volume=0.8[m];[1:a]volume=0.55[s];[m][s]amix=2:normalize=0:duration=first",
                             "-ac", "1", "-ar", str(audio.SR), str(wav)], check=True)
             (rd / "sfx.wav").unlink()
+    if spec.get("voiced"):
+        vs = [(s["t0"] + voice.LEAD, s["voice"]) for s in spec["scenes"] if s.get("voice")]
+        args, fl = [ffmpeg, "-v", "error", "-y", "-i", str(wav)], ["[0:a]volume=0.3[b]"]
+        for k, (st, f) in enumerate(vs, start=1):
+            args += ["-i", f]
+            fl.append(f"[{k}:a]aresample={audio.SR},adelay={int(st * 1000)}:all=1[v{k}]")
+        fl.append("[b]" + "".join(f"[v{k}]" for k in range(1, len(vs) + 1)) + f"amix={len(vs) + 1}:normalize=0:duration=first[o]")
+        mixed = rd / "audio_voice.wav"
+        subprocess.run(args + ["-filter_complex", ";".join(fl), "-map", "[o]", "-ac", "1", "-ar", str(audio.SR), str(mixed)], check=True)
+        wav.unlink()
+        wav = mixed
     out = rd / "audio.m4a"
-    target = "-18" if music == "none" else "-16"
+    target = "-16" if music != "none" or spec.get("voiced") else "-18"
     subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(wav), "-af", f"loudnorm=I={target}:TP=-1.5:LRA=11", "-ar", "48000", "-ac", "2",
                     "-c:a", "aac", "-b:a", "192k", str(out)], check=True)
     wav.unlink()
@@ -254,7 +284,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=os.path.join("热点", datetime.now().strftime("%Y-%m-%d")), help="稿子所在文件夹，默认 热点/今天日期")
     ap.add_argument("--size", default="1920x1080", help="1920x1080 横屏（默认）/ 1080x1920 竖屏")
-    ap.add_argument("--style", default="poster", choices=sorted(STYLES), help="画面风格：poster（默认）/ chalk / paper")
+    ap.add_argument("--style", default="poster", choices=sorted(STYLES), help="画面风格：poster（默认）/ chalk / paper / sticker")
     ap.add_argument("--music", default="beat", help="beat（默认，自带合成节奏）/ none（只留转场音效）/ 音乐文件路径")
     ap.add_argument("--avatar", default=None, help="字幕胶囊头像，默认 热点/avatar.png")
     ap.add_argument("--fps", type=int, default=30)
@@ -266,28 +296,32 @@ def main():
         die("--size 写成 1920x1080 或 1080x1920")
     dirp = Path(a.dir).resolve()
     avatar = a.avatar
-    if avatar is None:
-        for c in (dirp.parent / "avatar.png", dirp.parent / "avatar.jpg"):
+    if avatar is None:                            # IP 文件夹里的头像优先，其次是老位置 热点/avatar.png
+        for c in (dirp.parent / "ip" / "avatar.png", dirp.parent / "ip" / "avatar.jpg", dirp.parent / "avatar.png", dirp.parent / "avatar.jpg"):
             if c.exists():
                 avatar = str(c)
                 break
-    sc, spec, warns = load(dirp, a.size, avatar)
+    if not (dirp / "script.json").exists():
+        die(f"找不到 {dirp / 'script.json'}。要在用户的工作文件夹里运行（里面有「热点」文件夹），或者用 --dir 指定。")
     node, chrome, ffmpeg = find_node(), find_chrome(), find_ffmpeg()
+    vo = voice.ensure(dirp, ffmpeg, strict=not a.check) or {}   # 稿子是 voice: tts 才会配音
+    sc, spec, warns = load(dirp, a.size, avatar, vo)
     rd = prepare(dirp, spec, avatar, a.style)
     t0 = time.time()
-    print(f"{len(spec['scenes'])} 屏，{spec['total']} 秒，{a.size}，风格：{a.style}（{STYLES[a.style]}），头像：{'有' if spec['avatar'] else '无'}")
+    print(f"{len(spec['scenes'])} 屏，{spec['total']} 秒，{a.size}，风格：{a.style}（{STYLES[a.style]}），头像：{'有' if spec['avatar'] else '无'}，旁白：{('有（' + str(len(vo)) + ' 屏）') if vo else '无'}")
     for w in warns:
         print("提醒  " + w)
 
     chk = rd / f"check-{spec['w']}x{spec['h']}"
     sheet = chk / "sheet.jpg"
     tag = chk / "style.txt"   # 定格图是哪种风格出的；换了风格就得重出
-    fresh = (sheet.exists() and tag.exists() and tag.read_text(encoding="utf-8").strip() == a.style
+    stamp = f"{a.style} {spec['total']}"   # 风格或总长（配音改了会变）不一样就重出
+    fresh = (sheet.exists() and tag.exists() and tag.read_text(encoding="utf-8").strip() == stamp
              and sheet.stat().st_mtime > (dirp / "script.json").stat().st_mtime
              and sheet.stat().st_mtime > (ASSETS / "styles" / f"{a.style}.html").stat().st_mtime)
     if a.check or a.only or not fresh:
         chk, files = stills(node, chrome, ffmpeg, rd, spec, set(filter(None, a.only.split(","))))
-        (chk / "style.txt").write_text(a.style, encoding="utf-8")
+        (chk / "style.txt").write_text(stamp, encoding="utf-8")
         print(f"定格图 {len(files)} 张：{chk}（总览拼图 {chk / 'sheet.jpg'}）")
     else:
         print(f"定格图比稿子新，不重出：{sheet}")
